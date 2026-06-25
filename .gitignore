@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Data / output (keep locally, not on GitHub)
+*.duckdb
+*.duckdb.wal
+*.duckdb.*-bak
+*.parquet
+*.csv
+output/
+pipeline.log
+eurovoc_labels.yaml
+
+# Experiments (local only)
+experiments/
+
+# Reference materials (not ours to distribute)
+euplex_codebook.pdf
+
+# Paper drafts (not part of the tool)
+*.qmd
+
+# Internal development docs
+docs/HANDOFF-for-review.md
+docs/REVIEW-from-gpt.md
+docs/extraction-approach-summary_files/
+
+# Rendered docs (source .md is tracked)
+docs/*.html
+
+# IDE / tools / OS
+.DS_Store
+.claude/
+.pytest_cache/
+.coverage
+.python-version

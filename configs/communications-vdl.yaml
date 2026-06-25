@@ -1,0 +1,31 @@
+# All EU Commission communications from the von der Leyen era (2019-12 onwards).
+# These use modern XHTML with CSS classes → paragraph-level extraction.
+
+metadata:
+  project_name: "EU Communications (von der Leyen era)"
+  author: "Timo Seidl"
+  description: "All Commission communications from Dec 2019 onwards. Extracted at paragraph level with section headings and footnotes."
+
+data:
+  mode: "descriptive"
+  document_types:
+    - "communication"
+  start_date: 2019-12-01
+  end_date: 2026-04-01
+
+processing:
+  automated_mode: true
+  text_extraction:
+    include_recitals: true
+    include_articles: true
+    include_annexes: false
+    strip_boilerplate: true
+  include_relations: true
+  include_eurovoc: true
+  parallel: true
+  max_workers: 8
+
+output:
+  formats:
+    - "parquet"
+  output_directory: "./output/communications-vdl"

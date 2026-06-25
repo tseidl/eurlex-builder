@@ -1,0 +1,49 @@
+# eurlex-builder example configuration
+# Two modes: "fixed" (specific documents) or "descriptive" (search by criteria)
+
+metadata:
+  project_name: "EU Digital Policy Dataset"
+  author: "Your Name"
+  description: "Dataset of EU digital policy legislation."
+
+# --- Fixed mode: provide specific CELEX IDs ---
+# data:
+#   mode: "fixed"
+#   celex_ids:
+#     - "32016R0679"    # GDPR
+#     - "32024R1689"    # AI Act
+#   procedure_numbers:
+#     - "2021/0106"
+
+# --- Descriptive mode: search by date range and document types ---
+data:
+  mode: "descriptive"
+  document_types:
+    - "regulation"
+    - "directive"
+    - "decision"
+    - "communication"      # not hardcoded — any EUR-Lex type works
+  start_date: 2020-01-01
+  end_date: 2025-12-31
+  filter_keywords:
+    - "artificial intelligence"
+    - "digital"
+
+processing:
+  automated_mode: false    # pause for EuroVoc label review
+  text_extraction:
+    include_recitals: true
+    include_articles: true
+    include_annexes: true
+    article_granularity: article   # "article" (default, one row per article), "paragraph", or "point"
+  translation:
+    translate_full_text: true      # works.full_text (doc-level English version)
+    translate_text_units: true     # text_units.text (per-unit English version)
+    max_full_text_chars: 100000    # skip full_text translation above this size; 0 disables the limit
+  include_relations: true
+  fetch_original_relations_for_consolidated: true
+
+output:
+  formats:
+    - "parquet"
+  output_directory: "./output"

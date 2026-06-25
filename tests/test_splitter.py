@@ -1,0 +1,316 @@
+"""Unit tests for the sub-article splitter."""
+
+from __future__ import annotations
+
+import pytest
+
+from eurlex_builder.extractors.splitter import (
+    is_amending_article,
+    split_article,
+)
+
+
+# ---------------------------------------------------------------------------
+# Article-level (default) — must reproduce current behavior bit-for-bit.
+# ---------------------------------------------------------------------------
+
+def test_article_level_single_block():
+    parts = ["This Regulation shall enter into force on 28 August 2003."]
+    units = split_article(parts, number="20", title=None, granularity="article")
+    assert len(units) == 1
+    assert units[0]["type"] == "article"
+    assert units[0]["paragraph_num"] is None
+    assert units[0]["point_letter"] is None
+    assert units[0]["text"] == "This Regulation shall enter into force on 28 August 2003."
+
+
+def test_article_level_multi_block_joins_with_space():
+    parts = ["1. First paragraph.", "2. Second paragraph.", "3. Third."]
+    units = split_article(parts, number="5", title="Some title", granularity="article")
+    assert len(units) == 1
+    assert units[0]["text"] == "1. First paragraph. 2. Second paragraph. 3. Third."
+    assert units[0]["title"] == "Some title"
+    assert units[0]["paragraph_num"] is None
+
+
+def test_article_level_empty():
+    units = split_article([], number="1", title=None, granularity="article")
+    assert len(units) == 1
+    assert units[0]["text"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Paragraph-level — clean modern-OJ case (one paragraph per body_part).
+# ---------------------------------------------------------------------------
+
+def test_paragraph_level_clean_split():
+    parts = [
+        "1. The first paragraph says X.",
+        "2. The second paragraph says Y.",
+        "3. The third paragraph says Z.",
+    ]
+    units = split_article(parts, number="5", title="My Article", granularity="paragraph")
+    assert len(units) == 3
+    assert [u["paragraph_num"] for u in units] == ["1", "2", "3"]
+    assert units[0]["text"] == "The first paragraph says X."
+    assert units[1]["text"] == "The second paragraph says Y."
+    assert units[2]["text"] == "The third paragraph says Z."
+    # Title attaches to first row only.
+    assert units[0]["title"] == "My Article"
+    assert units[1]["title"] is None
+    assert units[2]["title"] is None
+
+
+def test_paragraph_level_preamble_gets_paragraph_zero():
+    parts = [
+        "Member States shall ensure the following.",  # preamble (no number)
+        "1. First obligation.",
+        "2. Second obligation.",
+    ]
+    units = split_article(parts, number="10", title="Obligations", granularity="paragraph")
+    assert len(units) == 3
+    assert units[0]["paragraph_num"] == "0"
+    assert units[0]["text"] == "Member States shall ensure the following."
+    assert units[0]["title"] == "Obligations"  # title on preamble
+    assert units[1]["paragraph_num"] == "1"
+    assert units[1]["title"] is None  # title NOT repeated on first numbered paragraph
+
+
+def test_paragraph_level_letter_suffix():
+    parts = [
+        "1. First paragraph.",
+        "1a. Amendment-inserted paragraph.",
+        "2. Second paragraph.",
+        "2a. Another amendment.",
+    ]
+    units = split_article(parts, number="5", title=None, granularity="paragraph")
+    assert [u["paragraph_num"] for u in units] == ["1", "1a", "2", "2a"]
+
+
+def test_paragraph_level_inline_smushed_text():
+    """Older HTML / PDF can produce one body_part with multiple paragraphs inline."""
+    parts = [
+        "1. First. 2. Second. 3. Third.",
+    ]
+    units = split_article(parts, number="5", title=None, granularity="paragraph")
+    # Lenient fallback should find all three.
+    assert [u["paragraph_num"] for u in units] == ["1", "2", "3"]
+    assert units[0]["text"] == "First."
+    assert units[1]["text"] == "Second."
+    assert units[2]["text"] == "Third."
+
+
+def test_paragraph_level_handles_pdf_ocr_artifact():
+    """1980s PDF extraction can produce '1 .' with a space between digit and period."""
+    parts = [
+        "1 . The column headed 'EXAA8a' is replaced. 2. The column headed 'UK' is replaced.",
+    ]
+    units = split_article(parts, number="1", title=None, granularity="paragraph")
+    assert [u["paragraph_num"] for u in units] == ["1", "2"]
+    assert "EXAA8a" in units[0]["text"]
+    assert "UK" in units[1]["text"]
+
+
+def test_paragraph_level_no_numbered_structure_falls_back_to_single_unit():
+    """An article that has no numbered paragraphs stays as one row."""
+    parts = ["The contractual liability of the Centre shall be governed by the law applicable."]
+    units = split_article(parts, number="18", title=None, granularity="paragraph")
+    assert len(units) == 1
+    assert units[0]["paragraph_num"] is None  # no split detected
+    assert units[0]["text"] == parts[0]
+
+
+def test_paragraph_level_does_not_falsely_split_on_cross_references():
+    """'Article 5(2)(a)' contains digits but no period after — must not match."""
+    parts = [
+        "The matters referred to in Article 5(2)(a) shall be governed by this Regulation.",
+    ]
+    units = split_article(parts, number="3", title=None, granularity="paragraph")
+    assert len(units) == 1
+
+
+# ---------------------------------------------------------------------------
+# Point-level — lettered (a), (b), ...
+# ---------------------------------------------------------------------------
+
+def test_point_level_splits_lettered_points():
+    # Realistic HTML structure: each point comes as its own <p> element,
+    # so each is a separate body_part. Joined with newlines internally.
+    parts = [
+        "1. Member States shall ensure that the following are protected:",
+        "(a) personal data;",
+        "(b) sensitive data;",
+        "(c) biometric data.",
+        "2. The Commission shall report annually.",
+    ]
+    units = split_article(parts, number="5", title=None, granularity="point")
+    # Expect: paragraph 1 stem + 3 points, then paragraph 2 as single unit (no points).
+    paragraph_nums = [u["paragraph_num"] for u in units]
+    point_letters = [u["point_letter"] for u in units]
+    assert "1" in paragraph_nums
+    assert point_letters.count("a") == 1
+    assert point_letters.count("b") == 1
+    assert point_letters.count("c") == 1
+    # Paragraph 2 stays as one unit (no points).
+    p2 = [u for u in units if u["paragraph_num"] == "2"]
+    assert len(p2) == 1
+    assert p2[0]["point_letter"] is None
+
+
+def test_point_level_trailing_subparagraph_emitted_separately():
+    """A non-point line after the last point gets its own row (GDPR Art 6(1) pattern)."""
+    parts = [
+        "1. Processing shall be lawful if at least one applies:",
+        "(a) consent;",
+        "(b) contract;",
+        "(c) legal obligation;",
+        "Point (c) of the first subparagraph shall not apply to processing carried out by public authorities.",
+    ]
+    units = split_article(parts, number="6", title=None, granularity="point")
+    # Expect: stem, (a), (b), (c), and trailing subparagraph — 5 rows, all paragraph_num=1.
+    assert len(units) == 5
+    point_letters = [u["point_letter"] for u in units]
+    assert point_letters.count("a") == 1
+    assert point_letters.count("b") == 1
+    assert point_letters.count("c") == 1
+    # Trailing subparagraph has point_letter=None and contains the qualifier text.
+    trailing = [u for u in units if u["point_letter"] is None and "shall not apply" in u["text"]]
+    assert len(trailing) == 1
+    assert trailing[0]["paragraph_num"] == "1"
+    # The (c) point's text does NOT contain the trailing subparagraph.
+    c_point = [u for u in units if u["point_letter"] == "c"][0]
+    assert "shall not apply" not in c_point["text"]
+
+
+def test_point_level_continuation_line_between_points_belongs_to_preceding():
+    """Regression for bug #4 from external review: a non-point line between
+    two points must be absorbed into the preceding point, not dropped."""
+    parts = [
+        "1. The following apply:",
+        "(a) first line",
+        "continued line for point a",
+        "(b) second line",
+    ]
+    units = split_article(parts, number="5", title=None, granularity="point")
+    # Expect stem + (a) (with continuation) + (b)
+    assert len(units) == 3
+    a_point = [u for u in units if u["point_letter"] == "a"][0]
+    assert "first line" in a_point["text"]
+    assert "continued line for point a" in a_point["text"]
+    b_point = [u for u in units if u["point_letter"] == "b"][0]
+    assert "second line" in b_point["text"]
+    # Continuation must NOT be its own row.
+    assert all(u["point_letter"] is not None or u["paragraph_num"] == "1" for u in units)
+
+
+def test_paragraph_level_partially_smushed_recovers_all_three():
+    """Regression for bug #5 from external review: when strict finds some
+    markers and lenient finds more siblings (smushed onto the same line),
+    we must use lenient — not return early on strict>=2."""
+    parts = ["1. First. 2. Second.", "3. Third."]
+    units = split_article(parts, number="5", title=None, granularity="paragraph")
+    nums = [u["paragraph_num"] for u in units]
+    assert nums == ["1", "2", "3"]
+    assert "First." in units[0]["text"]
+    assert "Second." in units[1]["text"]
+    assert "Third." in units[2]["text"]
+
+
+def test_point_level_ignores_inline_cross_references():
+    """'point (f) of paragraph 1' must NOT match as a point marker."""
+    parts = [
+        "1. Processing shall be lawful if at least one applies:",
+        "(a) consent;",
+        "(b) contract;",
+        "Point (f) of the first subparagraph shall not apply to processing carried out by public authorities.",
+    ]
+    units = split_article(parts, number="6", title=None, granularity="point")
+    point_letters = [u["point_letter"] for u in units]
+    # Only one (a) and one (b) — no false (f) from the cross-reference.
+    assert point_letters.count("a") == 1
+    assert point_letters.count("b") == 1
+    assert "f" not in point_letters
+
+
+def test_point_level_paragraph_without_points_emits_one_row():
+    parts = ["1. A simple paragraph with no lettered points.", "2. Another simple paragraph."]
+    units = split_article(parts, number="5", title=None, granularity="point")
+    assert len(units) == 2
+    assert all(u["point_letter"] is None for u in units)
+
+
+# ---------------------------------------------------------------------------
+# Amending-article handling.
+# ---------------------------------------------------------------------------
+
+def test_is_amending_article_by_title():
+    assert is_amending_article("Amendments to Regulation (EU) No 575/2013", "")
+    assert is_amending_article("Amending Directive 2009/138/EC", "")
+    assert is_amending_article("Modifications to Decision 2014/415", "")
+    assert not is_amending_article("Definitions", "")
+    assert not is_amending_article(None, "")
+
+
+def test_amending_article_mechanical_edits_get_amendment_item_subtype():
+    parts = [
+        "1. Article 5 is deleted.",
+        "2. In Article 6, paragraph 2, the words 'X' are replaced by 'Y'.",
+        "3. The following Article is inserted after Article 8: 'Article 8a — ...'.",
+    ]
+    units = split_article(
+        parts, number="1", title="Amendments to Regulation (EU) No 575/2013",
+        granularity="paragraph",
+    )
+    # First two are mechanical (no quoted block), third has a quoted block (substantive).
+    assert units[0]["subtype"] == "amendment_item"
+    assert units[1]["subtype"] == "amendment_item"
+    assert units[2]["subtype"] is None  # substantive replacement
+
+
+def test_amending_article_substantive_replacement_detected_via_quote():
+    parts = [
+        "1. Article 10 is replaced by the following: 'Article 10 — New scope: 1. The scope shall be...'.",
+    ]
+    units = split_article(
+        parts, number="1", title="Amendments to Directive 2009/138/EC",
+        granularity="paragraph",
+    )
+    # Regression for bug #3 from external review: the inner "1." inside the
+    # quoted replacement text must NOT trigger a second paragraph split.
+    assert len(units) == 1
+    assert units[0]["paragraph_num"] == "1"
+    assert units[0]["subtype"] is None
+    # Full quoted replacement text must be preserved.
+    assert "The scope shall be" in units[0]["text"]
+
+
+def test_amending_article_does_not_split_inside_quoted_smart_quote_block():
+    """Smart-quote variant: ‘ ... ’ used by modern OJ HTML."""
+    parts = [
+        "1. Article 5 is replaced by the following: ‘Article 5\n1. First requirement.\n2. Second requirement.’",
+    ]
+    units = split_article(
+        parts, number="1", title="Amendments to Regulation (EU) No 575/2013",
+        granularity="paragraph",
+    )
+    assert len(units) == 1
+    assert "First requirement" in units[0]["text"]
+    assert "Second requirement" in units[0]["text"]
+
+
+def test_non_amending_article_never_gets_amendment_item_subtype():
+    parts = ["1. The Commission shall report.", "2. Reports shall be public."]
+    units = split_article(parts, number="20", title="Reporting", granularity="paragraph")
+    assert all(u["subtype"] is None for u in units)
+
+
+# ---------------------------------------------------------------------------
+# Recital semantics — splitter is NEVER called on recitals; sanity check that
+# the function only emits type='article' to prevent accidental misuse.
+# ---------------------------------------------------------------------------
+
+def test_emits_article_type_only():
+    parts = ["1. text.", "2. more text."]
+    for granularity in ("article", "paragraph", "point"):
+        units = split_article(parts, number="5", title=None, granularity=granularity)
+        assert all(u["type"] == "article" for u in units)

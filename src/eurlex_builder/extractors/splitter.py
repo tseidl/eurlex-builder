@@ -1,0 +1,345 @@
+"""Sub-article splitting at paragraph and point granularity.
+
+EU drafting convention (Joint Practical Guide):
+  Article > Paragraph (numbered "1.", "2.", ...) > Point (lettered "(a)", "(b)", ...)
+  Citation form: Article 5(2)(a) = Article 5, paragraph 2, point (a).
+
+This module takes the body_parts produced by an HTML/PDF extractor (one string
+per source element, in document order) and returns one or more text_unit dicts
+according to the requested granularity:
+
+  - "article":   one unit per article (current behavior, byte-identical)
+  - "paragraph": one unit per numbered paragraph; preamble (text before "1.")
+                 gets paragraph_num="0"
+  - "point":     one unit per lettered point when present, otherwise falls
+                 back to paragraph
+
+Amending-act articles (Article 1 of an amending regulation is a list of edits
+to another act) are detected heuristically. Mechanical edit paragraphs get
+subtype="amendment_item"; substantive replacement paragraphs (introduce
+quoted replacement text) keep subtype=None and stay as a single row.
+"""
+
+from __future__ import annotations
+
+import re
+
+# Newline-anchored marker: paragraph break before the digit.
+# Strict — used first, for clean structural extraction.
+# Allows optional whitespace between the digit and period (handles the
+# "1 ." OCR artifact common in 1980s-1990s PDF-extracted regulations).
+_PARA_MARKER_STRICT = re.compile(
+    r"(?:^|\n)\s*(\d+[a-z]?)\s*\.\s+(?=\S)"
+)
+
+# Lenient fallback: also matches after sentence-ending punctuation when the
+# body got smushed into a single string (older HTML, PDF extraction).
+_PARA_MARKER_LENIENT = re.compile(
+    r"(?:^|\n|(?<=[.!?:;])\s+)(\d+[a-z]?)\s*\.\s+(?=\S)"
+)
+
+# Lettered point marker: "(a) ", "(b) ", ... ONLY anchored to start-of-line.
+# Inline cross-references like "point (f) of paragraph 1" must NOT match.
+# This relies on structural newlines between source elements being preserved.
+_POINT_MARKER = re.compile(
+    r"(?:^|\n)\s*\(([a-z])\)\s+(?=\S)"
+)
+
+# Heuristic: is this article an "Amendments to Regulation X" article?
+_AMENDING_TITLE = re.compile(
+    r"^(amendments?\s+to|amending|modifications?\s+to|modifying)\b",
+    re.IGNORECASE,
+)
+
+# Inside an amending article, this marker pattern indicates a mechanical edit
+# (deletion, renumbering, cross-ref change). Substantive replacements contain
+# a quoted block (colon followed by «...», '...', or "...").
+_REPLACEMENT_INTRO = re.compile(
+    r":\s*[‘“«„\"'‹]"
+)
+
+# Quoted-block detection: EU amending acts express substantive replacements as
+# `replaced by the following: '...'.` The inner content is the new law; markers
+# inside it (own paragraph numbers, lettered points) must NOT be split as if
+# they were paragraphs of the amending act. We detect the open-quote that
+# follows a colon and find its matching close.
+_QUOTED_BLOCK_OPEN = re.compile(r":\s*([\'‘\"“«])")
+_CLOSE_QUOTE_FOR = {"'": "'", "‘": "’", '"': '"', "“": "”", "«": "»"}
+
+
+def _find_quoted_regions(text: str) -> list[tuple[int, int]]:
+    """Find quoted-replacement regions in text. Returns list of (start, end)."""
+    regions: list[tuple[int, int]] = []
+    pos = 0
+    while pos < len(text):
+        m = _QUOTED_BLOCK_OPEN.search(text, pos)
+        if not m:
+            break
+        open_q = m.group(1)
+        close_q = _CLOSE_QUOTE_FOR[open_q]
+        close_idx = text.find(close_q, m.end())
+        if close_idx == -1:
+            break
+        # Region covers the open quote position through one past the close.
+        regions.append((m.end() - 1, close_idx + 1))
+        pos = close_idx + 1
+    return regions
+
+
+def _is_in_quoted_region(pos: int, regions: list[tuple[int, int]]) -> bool:
+    return any(s <= pos < e for s, e in regions)
+
+
+def _make_unit(
+    *,
+    type: str = "article",
+    number: str | None,
+    title: str | None,
+    text: str,
+    subtype: str | None = None,
+    paragraph_num: str | None = None,
+    point_letter: str | None = None,
+) -> dict:
+    return {
+        "type": type,
+        "subtype": subtype,
+        "number": number,
+        "paragraph_num": paragraph_num,
+        "point_letter": point_letter,
+        "title": title,
+        "text": text,
+    }
+
+
+def _normalize_text(text: str) -> str:
+    """Collapse newlines and runs of whitespace to single spaces."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _detect_paragraph_markers(structured_text: str) -> list[tuple[int, int, str]]:
+    """Find numbered paragraph markers. Returns list of (start, end, marker).
+
+    Strategy: collect strict (newline-anchored) markers, then also run the
+    lenient (sentence-anchored) pattern. Use lenient ONLY if it strictly
+    extends the strict list (every strict marker is in the lenient list, and
+    lenient finds more). When strict finds nothing, do NOT fall back — that
+    would produce spurious splits in concatenated annex/footnote text.
+
+    Why "strictly extends" rather than ">= len(strict)+1": prevents a lenient
+    set that disagrees with strict from overriding it; lenient is allowed only
+    to add siblings that strict missed because they were on the same line.
+    """
+    quoted = _find_quoted_regions(structured_text)
+    strict = [
+        (m.start(), m.end(), m.group(1))
+        for m in _PARA_MARKER_STRICT.finditer(structured_text)
+        if not _is_in_quoted_region(m.start(), quoted)
+    ]
+    if not strict:
+        # No real paragraph structure detected; do not fall back to lenient.
+        return strict
+
+    lenient = [
+        (m.start(), m.end(), m.group(1))
+        for m in _PARA_MARKER_LENIENT.finditer(structured_text)
+        if not _is_in_quoted_region(m.start(), quoted)
+    ]
+    if len(lenient) <= len(strict):
+        return strict
+
+    # Lenient may add siblings, but every strict marker must be present in
+    # lenient (positions match). This is the normal case since lenient's
+    # anchor is a superset of strict's.
+    strict_positions = {pos for pos, _, _ in strict}
+    lenient_positions = {pos for pos, _, _ in lenient}
+    if strict_positions.issubset(lenient_positions):
+        return lenient
+    return strict
+
+
+def _split_paragraph_into_points(
+    para_text: str, *, number: str | None, title: str | None,
+    paragraph_num: str, subtype: str | None,
+) -> list[dict] | None:
+    """Split a paragraph on lettered (a), (b), ... markers.
+
+    Emits one row per: stem (text before the first point); each point — where
+    continuation lines between two points are absorbed into the PRECEDING
+    point (not dropped); and each trailing subparagraph appearing after the
+    LAST point (e.g. GDPR Art 6(1) ends with "Point (f) of the first
+    subparagraph shall not apply to processing carried out by public
+    authorities…" — that text qualifies point (f) but is structurally a
+    separate subparagraph and gets its own row).
+
+    Inside quoted replacement blocks of amending acts, inner (a)/(b) markers
+    are ignored so we don't split the quoted-law content.
+
+    Returns None when no point structure detected.
+    """
+    quoted = _find_quoted_regions(para_text)
+    matches = [
+        m for m in _POINT_MARKER.finditer(para_text)
+        if not _is_in_quoted_region(m.start(), quoted)
+    ]
+    if len(matches) < 2:
+        return None
+
+    # Subparagraph boundary marker: newline followed by a non-point line.
+    # Used only to detect content AFTER the last point.
+    subpara_start_re = re.compile(r"\n\s*(?!\([a-z]\)\s+)(?=\S)")
+
+    units: list[dict] = []
+
+    # Stem: text before the first (a).
+    first_start = matches[0].start()
+    stem = _normalize_text(para_text[:first_start])
+    if stem:
+        units.append(_make_unit(
+            number=number, title=title, text=stem,
+            paragraph_num=paragraph_num, point_letter=None, subtype=subtype,
+        ))
+
+    # Each point's text runs from its marker to the next point marker.
+    # Continuation lines between two points belong to the preceding point.
+    # For the LAST point, the text ends at the first subparagraph start (if
+    # any) so the trailing qualifier becomes its own row.
+    last_point_text_end = len(para_text)
+    for i, m in enumerate(matches):
+        letter = m.group(1)
+        text_start = m.end()
+        if i + 1 < len(matches):
+            text_end = matches[i + 1].start()
+        else:
+            sp = subpara_start_re.search(para_text, text_start)
+            text_end = sp.start() if sp else len(para_text)
+            last_point_text_end = text_end
+        point_text = _normalize_text(para_text[text_start:text_end])
+        if not point_text:
+            continue
+        units.append(_make_unit(
+            number=number, title=title if (i == 0 and not stem) else None,
+            text=point_text,
+            paragraph_num=paragraph_num, point_letter=letter, subtype=subtype,
+        ))
+
+    # Trailing subparagraph after the last point.
+    if last_point_text_end < len(para_text):
+        trailing = _normalize_text(para_text[last_point_text_end:])
+        if trailing:
+            units.append(_make_unit(
+                number=number, title=None, text=trailing,
+                paragraph_num=paragraph_num, point_letter=None, subtype=subtype,
+            ))
+
+    return units if units else None
+
+
+def is_amending_article(title: str | None, body_text: str) -> bool:
+    """Heuristic detection of an amending-act article (a list of edits)."""
+    if title and _AMENDING_TITLE.search(title):
+        return True
+    # Body-level signals: presence of replacement phrasing
+    if re.search(
+        r"\b(is|are)\s+(hereby\s+)?(replaced|amended|deleted|inserted)\b",
+        body_text, re.IGNORECASE,
+    ):
+        # Require it appears at least twice (a single occurrence might just be a cross-ref).
+        matches = re.findall(
+            r"\b(?:is|are)\s+(?:hereby\s+)?(?:replaced|amended|deleted|inserted)\b",
+            body_text, re.IGNORECASE,
+        )
+        return len(matches) >= 2
+    return False
+
+
+def _paragraph_subtype(paragraph_text: str, *, is_amending: bool) -> str | None:
+    """For amending-act articles: tag mechanical edits as 'amendment_item',
+    leave substantive replacements untagged (subtype=None).
+    """
+    if not is_amending:
+        return None
+    # If the paragraph introduces a quoted replacement block, treat as
+    # substantive (subtype=None). Otherwise it's a mechanical edit.
+    if _REPLACEMENT_INTRO.search(paragraph_text):
+        return None
+    return "amendment_item"
+
+
+def split_article(
+    body_parts: list[str],
+    *,
+    number: str | None,
+    title: str | None,
+    granularity: str = "article",
+) -> list[dict]:
+    """Split an article body into text_units according to granularity.
+
+    body_parts: ordered list of strings from the source extractor (one per
+    structural child element). The splitter joins them with newlines
+    internally to preserve element boundaries as paragraph anchors, but emits
+    final text with whitespace normalized.
+    """
+    # Filter empties, keep order.
+    parts = [p for p in body_parts if p and p.strip()]
+
+    if granularity == "article" or not parts:
+        # Backward-compatible: single row, space-joined text (matches current).
+        text = " ".join(p.strip() for p in parts)
+        return [_make_unit(
+            number=number, title=title, text=text,
+            paragraph_num=None, point_letter=None, subtype=None,
+        )]
+
+    # Structured text with newlines preserves element boundaries for the regex.
+    structured = "\n".join(p.strip() for p in parts)
+
+    markers = _detect_paragraph_markers(structured)
+    if not markers:
+        # No paragraph structure detected. Emit as single article-level unit.
+        text = " ".join(p.strip() for p in parts)
+        return [_make_unit(
+            number=number, title=title, text=text,
+            paragraph_num=None, point_letter=None, subtype=None,
+        )]
+
+    is_amending = is_amending_article(title, structured)
+    units: list[dict] = []
+
+    # Preamble: text before the first numbered marker.
+    first_start = markers[0][0]
+    preamble = _normalize_text(structured[:first_start])
+    if preamble:
+        units.append(_make_unit(
+            number=number, title=title, text=preamble,
+            paragraph_num="0", point_letter=None, subtype=None,
+        ))
+
+    # Each numbered paragraph.
+    for i, (start, end, marker) in enumerate(markers):
+        text_start = end
+        text_end = markers[i + 1][0] if i + 1 < len(markers) else len(structured)
+        # Keep raw newlines for point detection; normalize only at emission.
+        raw_para_text = structured[text_start:text_end].strip()
+        para_text = _normalize_text(raw_para_text)
+        if not para_text:
+            continue
+
+        subtype = _paragraph_subtype(para_text, is_amending=is_amending)
+        # Title attaches to the first row when no preamble was emitted.
+        row_title = title if (i == 0 and not preamble) else None
+
+        if granularity == "point" and subtype != "amendment_item":
+            point_units = _split_paragraph_into_points(
+                raw_para_text, number=number, title=row_title,
+                paragraph_num=marker, subtype=subtype,
+            )
+            if point_units:
+                units.extend(point_units)
+                continue
+
+        units.append(_make_unit(
+            number=number, title=row_title, text=para_text,
+            paragraph_num=marker, point_letter=None, subtype=subtype,
+        ))
+
+    return units
