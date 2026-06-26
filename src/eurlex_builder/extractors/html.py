@@ -270,30 +270,49 @@ def _extract_standard_articles(tree, *, granularity: str = "article") -> list[di
     return units
 
 
+_BODY_SKIP_CLASSES = frozenset({
+    "eli-title", "oj-ti-art",
+    "modref", "title-article-norm",
+})
+
+_BODY_DESCEND_CLASSES = frozenset({
+    "", "norm", "norm inline-element",
+})
+
+
 def _walk_article_body(article_div) -> list[str]:
     """Collect body_parts from an article div, preserving point-level granularity.
 
-    Descends into unclassed <div> containers (which wrap numbered paragraphs in
-    modern OJ HTML) so each nested element (stem, lettered point) becomes its
-    own body_part. Leaf elements (<p>, <table>, …) are taken directly.
+    Descends into <div> containers that wrap paragraph sub-structure — both
+    unclassed divs (modern OJ HTML) and class="norm" / "norm inline-element"
+    divs (consolidated-text HTML) — so each nested element (stem, lettered
+    point) becomes its own body_part.  Skips amendment markers (modref) and
+    duplicate article headings (title-article-norm) that appear in consolidated
+    documents.
     """
     parts: list[str] = []
-    for child in article_div:
+    _collect_body_parts(article_div, parts)
+    return parts
+
+
+def _collect_body_parts(container, parts: list[str]) -> None:
+    for child in container:
         child_class = child.get("class", "") or ""
-        if child_class in ("eli-title", "oj-ti-art"):
+        if child_class in _BODY_SKIP_CLASSES:
             continue
         tag = etree.QName(child).localname
-        # Unclassed div = paragraph container — descend one level.
-        if tag == "div" and not child_class:
-            for grandchild in child:
-                text = _extract_text(grandchild)
+        if tag == "div" and child_class in _BODY_DESCEND_CLASSES:
+            if len(child):
+                _collect_body_parts(child, parts)
+            else:
+                text = _extract_text(child)
                 if text:
                     parts.append(text)
         else:
             text = _extract_text(child)
             if text:
                 parts.append(text)
-    return parts
+
 
 
 def _extract_standard_annexes(tree) -> list[dict]:

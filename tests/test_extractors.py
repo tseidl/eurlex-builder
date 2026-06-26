@@ -297,3 +297,141 @@ def test_pdf_parser_recognizes_considering_inline_as_old_style_recital():
     recitals = [u for u in units if u.get("type") == "recital"]
     assert len(recitals) == 2
     assert all("HAS ADOPTED" not in r["text"] for r in recitals)
+
+
+# ---------------------------------------------------------------------------
+# Consolidated HTML — point-level splitting with amendment markers
+# ---------------------------------------------------------------------------
+
+from eurlex_builder.extractors.html import HtmlExtractor, _walk_article_body
+from lxml import etree
+
+
+def _make_consolidated_article_html(article_num: str, body_xml: str) -> bytes:
+    """Build a minimal XHTML doc with one consolidated-format article."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        f'<div class="eli-subdivision" id="art_{article_num}">'
+        f'  <p class="title-article-norm">Article {article_num}</p>'
+        '  <div class="eli-title"><p class="stitle-article-norm">Test title</p></div>'
+        f'  {body_xml}'
+        '</div>'
+        '</body></html>'
+    ).encode()
+
+
+def test_consolidated_walk_descends_into_norm_divs():
+    """_walk_article_body must descend into <div class="norm"> containers
+    so each structural child (paragraph number, chapeau, point) becomes
+    its own body_part."""
+    xhtml = _make_consolidated_article_html("5", """
+        <div class="norm">
+          <span class="no-parag">1.  </span>
+          <div class="norm inline-element">
+            <p class="norm inline-element">Chapeau text:</p>
+            <div class="grid-container grid-list">
+              <div class="list grid-list-column-1"><span>(a) </span></div>
+              <div class="grid-list-column-2"><p class="norm">first point;</p></div>
+            </div>
+            <div class="grid-container grid-list">
+              <div class="list grid-list-column-1"><span>(b) </span></div>
+              <div class="grid-list-column-2"><p class="norm">second point.</p></div>
+            </div>
+          </div>
+        </div>
+    """)
+    tree = etree.fromstring(xhtml)
+    art_div = tree.xpath(".//*[@id='art_5']")[0]
+    parts = _walk_article_body(art_div)
+    assert "1." in parts
+    assert "Chapeau text:" in parts
+    assert any("(a)" in p and "first point" in p for p in parts)
+    assert any("(b)" in p and "second point" in p for p in parts)
+
+
+def test_consolidated_walk_skips_modref_markers():
+    """Amendment markers (<p class="modref">) must not appear in body_parts."""
+    xhtml = _make_consolidated_article_html("1", """
+        <p class="modref"><a href="#">▼M2</a></p>
+        <div class="norm">
+          <span class="no-parag">1.  </span>
+          <div class="norm inline-element">
+            <p class="norm inline-element">Chapeau:</p>
+            <p class="modref"><a href="#">▼B</a></p>
+            <div class="grid-container grid-list">
+              <div class="list grid-list-column-1"><span>(a) </span></div>
+              <div class="grid-list-column-2"><p class="norm">point text.</p></div>
+            </div>
+          </div>
+        </div>
+    """)
+    tree = etree.fromstring(xhtml)
+    art_div = tree.xpath(".//*[@id='art_1']")[0]
+    parts = _walk_article_body(art_div)
+    joined = " ".join(parts)
+    assert "▼" not in joined
+    assert "M2" not in joined
+
+
+def test_consolidated_walk_handles_text_only_norm_div():
+    """<div class="norm inline-element"> with text but no children must still
+    produce a body_part (paragraphs without sub-structure)."""
+    xhtml = _make_consolidated_article_html("4", """
+        <div class="norm">
+          <span class="no-parag">1.  </span>
+          <div class="norm inline-element">Simple paragraph text.</div>
+        </div>
+    """)
+    tree = etree.fromstring(xhtml)
+    art_div = tree.xpath(".//*[@id='art_4']")[0]
+    parts = _walk_article_body(art_div)
+    assert "1." in parts
+    assert "Simple paragraph text." in parts
+
+
+def test_consolidated_point_level_extraction_end_to_end():
+    """Full pipeline: consolidated HTML with amendment markers between points
+    must produce point-level rows, not paragraph-level blobs."""
+    xhtml = _make_consolidated_article_html("5", """
+        <div class="norm">
+          <span class="no-parag">1.  </span>
+          <div class="norm inline-element">
+            <p class="norm inline-element">Member States shall ensure:</p>
+            <p class="modref"><a href="#">▼M2</a></p>
+            <div class="grid-container grid-list">
+              <div class="list grid-list-column-1"><span>(a) </span></div>
+              <div class="grid-list-column-2"><p class="norm">data protection;</p></div>
+            </div>
+            <p class="modref"><a href="#">▼B</a></p>
+            <div class="grid-container grid-list">
+              <div class="list grid-list-column-1"><span>(b) </span></div>
+              <div class="grid-list-column-2"><p class="norm">privacy rights;</p></div>
+            </div>
+            <div class="grid-container grid-list">
+              <div class="list grid-list-column-1"><span>(c) </span></div>
+              <div class="grid-list-column-2"><p class="norm">security standards.</p></div>
+            </div>
+          </div>
+        </div>
+        <div class="norm">
+          <span class="no-parag">2.  </span>
+          <div class="norm inline-element">Simple paragraph without points.</div>
+        </div>
+    """)
+    ext = HtmlExtractor()
+    units = ext.extract("02001L0029-20190606", xhtml,
+                        include_recitals=False, include_articles=True,
+                        include_annexes=False, article_granularity="point")
+    assert len(units) >= 5
+    letters = [u["point_letter"] for u in units if u["point_letter"]]
+    assert "a" in letters
+    assert "b" in letters
+    assert "c" in letters
+    # No amendment markers leaked into text.
+    for u in units:
+        assert "▼" not in u["text"]
+    # Paragraph 2 present with real content.
+    p2 = [u for u in units if u["paragraph_num"] == "2"]
+    assert len(p2) == 1
+    assert "Simple paragraph" in p2[0]["text"]
