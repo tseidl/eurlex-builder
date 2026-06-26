@@ -664,12 +664,142 @@ def _extract_class_based_annexes(tree) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Consolidated-norm structure extraction
+# ---------------------------------------------------------------------------
+
+_CONSOLIDATED_NORM_SKIP = frozenset({
+    "arrow", "modref", "reference", "disclaimer",
+    "title-doc-first", "title-doc-last", "title-doc-oj-reference",
+    "hd-modifiers", "hd-toc-1", "hd-toc-2", "hd-toc-3",
+    "toc-1", "toc-2", "toc-3",
+    "title-fam-member", "title-fam-member-star",
+    "footnote",
+})
+
+
+def _is_consolidated_norm_structure(tree) -> bool:
+    """Consolidated-norm format: p elements with class 'title-article-norm'."""
+    return bool(tree.xpath(
+        ".//*[local-name()='p' and @class='title-article-norm']"
+    ))
+
+
+def _extract_consolidated_norm_recitals(tree) -> list[dict]:
+    """Extract recitals from consolidated-norm format."""
+    units: list[dict] = []
+    numbered_re = re.compile(r"^\((\d+)\)")
+    pending_number: str | None = None
+
+    for p in tree.iter("{http://www.w3.org/1999/xhtml}p", "p"):
+        cls = p.get("class", "")
+        if cls == "title-article-norm":
+            break
+        if cls != "norm":
+            continue
+        text = _extract_text(p)
+        if not text:
+            continue
+
+        m = numbered_re.match(text)
+        if m and len(text) < 10:
+            pending_number = m.group(1)
+        elif pending_number is not None:
+            full = f"({pending_number}) {text}"
+            cleaned = _strip_recital_tail(full)
+            units.append({
+                "type": "recital",
+                "subtype": _classify_recital(cleaned),
+                "number": pending_number,
+                "title": None,
+                "text": cleaned,
+            })
+            pending_number = None
+        elif numbered_re.match(text) and len(text) >= 10:
+            if _FOOTNOTE_REF_RE.match(text) or _INLINE_REF_START_RE.match(text):
+                continue
+            m = numbered_re.match(text)
+            cleaned = _strip_recital_tail(text)
+            units.append({
+                "type": "recital",
+                "subtype": _classify_recital(cleaned),
+                "number": m.group(1),
+                "title": None,
+                "text": cleaned,
+            })
+
+    return units
+
+
+def _extract_consolidated_norm_articles(
+    tree, *, granularity: str = "article",
+) -> list[dict]:
+    """Extract articles from consolidated-norm format."""
+    units: list[dict] = []
+
+    art_paras = tree.xpath(
+        ".//*[local-name()='p' and @class='title-article-norm']"
+    )
+
+    for p in art_paras:
+        title_text = _extract_text(p)
+        number = None
+        m = re.search(r"Article\s+(\d+[a-z]*)", title_text, re.IGNORECASE)
+        if m:
+            number = m.group(1)
+        elif re.search(r"Sole\s+Article", title_text, re.IGNORECASE):
+            number = "sole"
+
+        article_title: str | None = None
+        sibling = p.getnext()
+        if sibling is not None and sibling.get("class") == "stitle-article-norm":
+            article_title = _extract_text(sibling)
+            sibling = sibling.getnext()
+
+        body_parts: list[str] = []
+        while sibling is not None:
+            sib_class = sibling.get("class", "")
+            sib_tag = etree.QName(sibling).localname if isinstance(sibling.tag, str) else ""
+            if sib_class in ("title-article-norm", "title-division-1"):
+                break
+            if sib_class in _CONSOLIDATED_NORM_SKIP or sib_class.startswith("title-"):
+                sibling = sibling.getnext()
+                continue
+            if sib_class == "norm":
+                part = _extract_text(sibling)
+                if part:
+                    body_parts.append(part)
+            elif sib_tag == "div" and not sib_class:
+                for child in sibling:
+                    if child.get("class", "") == "norm":
+                        part = _extract_text(child)
+                        if part:
+                            body_parts.append(part)
+            sibling = sibling.getnext()
+
+        if body_parts or number:
+            units.extend(split_article(
+                body_parts, number=number, title=article_title,
+                granularity=granularity,
+            ))
+
+    return units
+
+
+# ---------------------------------------------------------------------------
 # Text-only structure extraction
 # ---------------------------------------------------------------------------
 
+_CHAPTER_HEADING_RE = re.compile(
+    r"^(?:CHAPTER|TITLE|PART|SECTION)\s+[IVXLCDM\d]+\s*$", re.IGNORECASE,
+)
+
+_CONSOLIDATED_MARKER_RE = re.compile(r"^[▼►▲◄]\s*[A-Z]\d*$")
+
+
 def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                        include_annexes: bool,
-                       article_granularity: str = "article") -> list[dict]:
+                       article_granularity: str = "article",
+                       container=None) -> list[dict]:
     """Extract text units from minimal text-only format.
 
     Handles two recital styles:
@@ -678,11 +808,15 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
       paragraphs like "(1) ...", "(2) ..."
     """
     units: list[dict] = []
-    text_div = tree.xpath(".//*[local-name()='div' and @id='TexteOnly']")
-    if not text_div:
-        return units
+    if container is not None:
+        root = container
+    else:
+        text_div = tree.xpath(".//*[local-name()='div' and @id='TexteOnly']")
+        if not text_div:
+            return units
+        root = text_div[0]
 
-    paragraphs = text_div[0].xpath(".//*[local-name()='p']")
+    paragraphs = root.xpath(".//*[local-name()='p']")
 
     recital_counter = 0
     in_recital_zone = False  # True after seeing "Whereas:" marker
@@ -719,6 +853,7 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
     # purposes and gets stripped by strip_boilerplate later anyway.
     _signature_re = re.compile(r"^Done at \w+[,\s]+\d", re.IGNORECASE)
     past_signature = False
+    skip_next_caps = False
 
     for idx, text in enumerate(raw_texts):
         if not text:
@@ -737,6 +872,23 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
             elif current_annex is not None:
                 current_annex["_body"].append(text)
             continue
+
+        # Skip chapter/division headings and consolidated modification markers.
+        if _CHAPTER_HEADING_RE.match(text):
+            skip_next_caps = True
+            continue
+        if _CONSOLIDATED_MARKER_RE.match(text):
+            continue
+        # Division subtitle: ALL CAPS short text immediately after a chapter
+        # heading (e.g. "RIGHTS AND EXCEPTIONS" after "CHAPTER II").
+        if (
+            skip_next_caps
+            and re.match(r"^[A-Z][A-Z\s,\-/()]+$", text)
+            and len(text) < 80
+        ):
+            skip_next_caps = False
+            continue
+        skip_next_caps = False
 
         # Only match Article/ANNEX as section headings, not inline references.
         # A heading like "ARTICLE 1" or "Article 3 Subject matter" is short and
@@ -1469,6 +1621,15 @@ class HtmlExtractor:
         return units
 
     @staticmethod
+    def _try_consolidated_norm(tree, inc_rec, inc_art, inc_anx, granularity="article") -> list[dict]:
+        units: list[dict] = []
+        if inc_rec:
+            units.extend(_extract_consolidated_norm_recitals(tree))
+        if inc_art:
+            units.extend(_extract_consolidated_norm_articles(tree, granularity=granularity))
+        return units
+
+    @staticmethod
     def _try_text_only(tree, inc_rec, inc_art, inc_anx, granularity="article") -> list[dict]:
         return _extract_text_only(
             tree, include_recitals=inc_rec, include_articles=inc_art, include_annexes=inc_anx,
@@ -1561,6 +1722,8 @@ class HtmlExtractor:
             extractors.append(("manual CSS", self._try_manual))
         if _is_class_based_structure(tree):
             extractors.append(("class-based OJ", self._try_class_based))
+        if _is_consolidated_norm_structure(tree):
+            extractors.append(("consolidated-norm", self._try_consolidated_norm))
         if _is_text_only_structure(tree):
             extractors.append(("text-only", self._try_text_only))
 
@@ -1577,6 +1740,24 @@ class HtmlExtractor:
                 logger.debug(
                     "All detected structures yielded 0 units for %s", celex_id
                 )
+
+        # Fallback: classless HTML (e.g. early consolidated texts) — same
+        # structure as text-only but without the <div id="TexteOnly"> wrapper.
+        if not units:
+            body = tree.xpath(".//*[local-name()='body']")
+            if body:
+                units = _extract_text_only(
+                    tree,
+                    include_recitals=include_recitals,
+                    include_articles=include_articles,
+                    include_annexes=include_annexes,
+                    article_granularity=article_granularity,
+                    container=body[0],
+                )
+                if units:
+                    logger.debug(
+                        "Used text-only fallback on body for %s", celex_id,
+                    )
 
         # Fallback: extract entire body as a single "body" text unit.
         # Useful for communications and other non-legislative documents.

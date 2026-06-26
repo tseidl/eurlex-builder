@@ -159,7 +159,7 @@ def _detect_paragraph_markers(structured_text: str) -> list[tuple[int, int, str]
 
 def _split_paragraph_into_points(
     para_text: str, *, number: str | None, title: str | None,
-    paragraph_num: str, subtype: str | None,
+    paragraph_num: str | None, subtype: str | None,
 ) -> list[dict] | None:
     """Split a paragraph on lettered (a), (b), ... markers.
 
@@ -234,6 +234,56 @@ def _split_paragraph_into_points(
     return units if units else None
 
 
+def _split_into_subparagraphs(
+    raw_para_text: str, *, number: str | None, title: str | None,
+    paragraph_num: str | None, subtype: str | None,
+) -> list[dict] | None:
+    """Split a paragraph into sub-paragraphs on newline boundaries.
+
+    Fires at "point" granularity when no lettered points were found.
+    Each body_part from the HTML extractor corresponds to a <p> element,
+    so newline boundaries represent genuine sub-paragraph breaks.
+
+    Returns None if the text contains fewer than 2 sub-paragraphs.
+    """
+    lines = [l.strip() for l in raw_para_text.split("\n") if l.strip()]
+    if len(lines) < 2:
+        return None
+
+    # Group lines: a line starting with uppercase starts a new sub-paragraph.
+    # Lines starting with lowercase, digits, or quotes are continuations.
+    groups: list[list[str]] = []
+    for line in lines:
+        if groups and not line[0].isupper():
+            groups[-1].append(line)
+        else:
+            groups.append([line])
+
+    if len(groups) < 2:
+        return None
+
+    # Require each group to be substantial (>= 40 chars) to avoid
+    # spurious splits on short fragment lines or layout artifacts.
+    if any(len(" ".join(g)) < 40 for g in groups):
+        return None
+
+    units: list[dict] = []
+    for i, group in enumerate(groups):
+        text = _normalize_text(" ".join(group))
+        if not text:
+            continue
+        units.append(_make_unit(
+            number=number,
+            title=title if i == 0 else None,
+            text=text,
+            paragraph_num=paragraph_num,
+            point_letter=None,
+            subtype=subtype,
+        ))
+
+    return units if len(units) >= 2 else None
+
+
 def is_amending_article(title: str | None, body_text: str) -> bool:
     """Heuristic detection of an amending-act article (a list of edits)."""
     if title and _AMENDING_TITLE.search(title):
@@ -295,7 +345,16 @@ def split_article(
 
     markers = _detect_paragraph_markers(structured)
     if not markers:
-        # No paragraph structure detected. Emit as single article-level unit.
+        # No paragraph structure detected.  At point granularity, the article
+        # may still contain (a)/(b)/... points directly (no numbered paragraph
+        # wrapper — e.g. InfoSoc Art. 2).
+        if granularity == "point":
+            point_units = _split_paragraph_into_points(
+                structured, number=number, title=title,
+                paragraph_num=None, subtype=None,
+            )
+            if point_units:
+                return point_units
         text = " ".join(p.strip() for p in parts)
         return [_make_unit(
             number=number, title=title, text=text,
@@ -335,6 +394,14 @@ def split_article(
             )
             if point_units:
                 units.extend(point_units)
+                continue
+            # No lettered points — try sub-paragraph splitting.
+            subpara_units = _split_into_subparagraphs(
+                raw_para_text, number=number, title=row_title,
+                paragraph_num=marker, subtype=subtype,
+            )
+            if subpara_units:
+                units.extend(subpara_units)
                 continue
 
         units.append(_make_unit(

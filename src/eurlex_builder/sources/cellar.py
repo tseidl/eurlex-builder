@@ -335,7 +335,8 @@ def _build_descriptive_query(
         return ""
 
     type_filter = f"FILTER({' || '.join(type_conditions)})"
-    sector_filter = f"FILTER({' || '.join(f'?sector = \"{s}\"^^xsd:string' for s in sorted(sectors))})"
+    sector_conditions = [f'?sector = "{s}"^^xsd:string' for s in sorted(sectors)]
+    sector_filter = f"FILTER({' || '.join(sector_conditions)})"
 
     date_filters = (
         f'FILTER(?date >= "{start_date.isoformat()}"^^xsd:date)\n'
