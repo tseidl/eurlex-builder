@@ -435,3 +435,243 @@ def test_consolidated_point_level_extraction_end_to_end():
     p2 = [u for u in units if u["paragraph_num"] == "2"]
     assert len(p2) == 1
     assert "Simple paragraph" in p2[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# COM signature guard (2026-07 review): prose starting "The President…" or
+# "For the Commission…" must not truncate the document.
+# ---------------------------------------------------------------------------
+
+def test_com_signature_requires_short_line():
+    from eurlex_builder.extractors.html import _is_com_signature
+
+    assert _is_com_signature("Done at Brussels, 3.5.2021")
+    assert _is_com_signature("For the Commission")
+    assert _is_com_signature("The President")
+    assert not _is_com_signature(
+        "The President of the European Council stressed the need for action."
+    )
+    assert not _is_com_signature(
+        "For the Commission to deliver on this, three steps are needed."
+    )
+
+
+def test_com_modern_does_not_truncate_on_president_prose():
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p class="Heading1">1. Introduction</p>
+<p class="Normal">The President of the European Council stressed the need for action on digital policy.</p>
+<p class="Normal">A second paragraph that must survive extraction.</p>
+<p class="Normal">Done at Brussels, 3.5.2021</p>
+<p class="Normal">For the Commission</p>
+</body></html>"""
+    units = HtmlExtractor().extract_com("52021DC0000", raw)
+    paragraphs = [u for u in units if u["type"] == "paragraph"]
+    assert len(paragraphs) == 2
+    assert any("must survive" in u["text"] for u in paragraphs)
+    assert not any("Done at" in u["text"] for u in paragraphs)
+
+
+# ---------------------------------------------------------------------------
+# Post-signature annexes (2026-07 review): annexes follow "Done at …" in the
+# OJ layout and must still be extracted; other post-signature noise is not.
+# ---------------------------------------------------------------------------
+
+def test_pdf_parser_extracts_annexes_after_signature():
+    md = """## Article 1
+This Regulation establishes rules.
+## Article 2
+It shall apply from 1 January 2025.
+Done at Brussels, 12 March 2014.
+For the Council
+The President
+## ANNEX I
+List of products
+Product one
+## ANNEX II
+Correlation table
+"""
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+    annexes = [u for u in units if u["type"] == "annex"]
+    assert [a["number"] for a in annexes] == ["I", "II"]
+    assert "Product one" in annexes[0]["text"]
+    # Signatory names between signature and first annex are discarded.
+    assert not any("The President" in u["text"] for u in units)
+
+
+def test_pdf_parser_discards_post_signature_noise_without_annex():
+    md = """## Article 1
+This Regulation establishes rules.
+Done at Brussels, 12 March 2014.
+For the Council
+( 1 ) OJ No L 169, 12.7.1993, p. 1.
+"""
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+    assert [u["type"] for u in units] == ["article"]
+    assert "OJ No L 169" not in units[0]["text"]
+
+
+def test_text_only_extracts_annex_after_signature():
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAS ADOPTED THIS REGULATION:</p>
+<p>Article 1</p>
+<p>Something shall apply.</p>
+<p>Done at Brussels, 12 March 2014.</p>
+<p>For the Council</p>
+<p>ANNEX I</p>
+<p>List of products</p>
+<p>ANNEX II</p>
+<p>Correlation table</p>
+</div></body></html>"""
+    units = HtmlExtractor().extract("31993R0001", raw)
+    annexes = [u for u in units if u["type"] == "annex"]
+    assert [a["number"] for a in annexes] == ["I", "II"]
+    assert "List of products" in annexes[0]["text"]
+    assert not any("For the Council" in u["text"] for u in units)
+
+
+# ---------------------------------------------------------------------------
+# Translate-before-extract gate: disabled recital extraction must not trigger
+# the fallback (recital count is always zero and says nothing about quality).
+# ---------------------------------------------------------------------------
+
+def test_fallback_does_not_fire_when_recitals_disabled():
+    from eurlex_builder.pipeline import _should_run_translate_fallback
+
+    assert not _should_run_translate_fallback(
+        [], "regulation", "fra", include_recitals=False,
+    )
+    assert _should_run_translate_fallback(
+        [], "regulation", "fra", include_recitals=True,
+    )
+
+
+def test_class_based_article_subtitle_becomes_title_not_body():
+    """The <p class="sti-art"> subtitle ("Scope") is the article title, not a
+    body fragment that would surface as a fake preamble row."""
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body>
+<p class="ti-art">Article 1</p>
+<p class="sti-art">Scope</p>
+<p class="normal">1. This Directive concerns the legal protection of copyright.</p>
+<p class="normal">2. It shall apply from a given date.</p>
+</body></html>"""
+    units = HtmlExtractor().extract(
+        "32001L0029", raw, article_granularity="paragraph",
+    )
+    articles = [u for u in units if u["type"] == "article"]
+    assert articles[0]["title"] == "Scope"
+    assert all(u["text"] != "Scope" for u in articles)
+    assert [u["paragraph_num"] for u in articles] == ["1", "2"]
+
+
+def test_text_only_article_title_line_becomes_title_not_preamble():
+    """Classless-era HTML: '<p>Article 1</p><p>Scope</p><p>1. …</p>' — the
+    short capitalized line is the title, not a fake paragraph-0 row."""
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAVE ADOPTED THIS DIRECTIVE:</p>
+<p>Article 1</p>
+<p>Scope</p>
+<p>1. This Directive concerns the legal protection of copyright.</p>
+<p>2. It shall not affect existing provisions.</p>
+<p>Article 2</p>
+<p>Member States shall provide for the exclusive right to authorise.</p>
+</div></body></html>"""
+    units = HtmlExtractor().extract("32001L0029", raw, article_granularity="paragraph")
+    art1 = [u for u in units if u["type"] == "article" and u["number"] == "1"]
+    assert art1[0]["title"] == "Scope"
+    assert [u["paragraph_num"] for u in art1] == ["1", "2"]
+    # A first body line that is a real sentence must NOT become a title.
+    art2 = [u for u in units if u["type"] == "article" and u["number"] == "2"]
+    assert art2[0]["title"] is None
+    assert "exclusive right" in art2[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Second-round regressions (2026-07 xhigh review of the first fix round).
+# ---------------------------------------------------------------------------
+
+def test_text_only_one_line_article_body_is_not_lost_to_title():
+    """A one-line article ('Repealed') must keep its line as text — a title
+    with empty text would be dropped by the pipeline's empty-unit filter."""
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body><div id="TexteOnly">
+<p>Article 1</p>
+<p>Repealed</p>
+<p>Article 2</p>
+<p>Member States shall provide for the exclusive right to authorise.</p>
+</div></body></html>"""
+    units = HtmlExtractor().extract("31993L0000", raw)
+    art1 = [u for u in units if u["type"] == "article" and u["number"] == "1"][0]
+    assert art1["text"] == "Repealed"
+    assert art1["title"] is None
+
+
+def test_com_signature_rejects_lowercase_continuations():
+    from eurlex_builder.extractors.html import _is_com_signature
+
+    assert not _is_com_signature("The President concluded.")
+    assert not _is_com_signature("The President will report in June.")
+    assert not _is_com_signature("For the Commission to act, more is needed.")
+    assert _is_com_signature("The President")
+    assert _is_com_signature("For the Commission")
+    assert _is_com_signature("Done at Brussels, 3.5.2021")
+
+
+def test_pdf_parser_rejects_annexes_cover_heading():
+    """'## ANNEXES' is a cover heading, not an annex numbered None titled 'ES'."""
+    md = """## Article 1
+Rules apply.
+Done at Brussels, 3 March 2020.
+## ANNEXES
+## ANNEX I
+Real annex content.
+"""
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+    annexes = [u for u in units if u["type"] == "annex"]
+    assert [a["number"] for a in annexes] == ["I"]
+    assert not any(a.get("title") == "ES" for a in annexes)
+
+
+def test_pdf_parser_keeps_oj_footnotes_out_of_post_signature_annexes():
+    md = """## Article 1
+Rules apply.
+Done at Brussels, 3 March 2020.
+## ANNEX I
+List of products
+( 1 ) OJ L 123, 12.7.1993, p. 1.
+"""
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+    annex = [u for u in units if u["type"] == "annex"][0]
+    assert "List of products" in annex["text"]
+    assert "OJ L 123" not in annex["text"]
+
+
+def test_class_based_empty_subtitle_yields_null_title():
+    """An sti-art element with no text must give title=None, not ''."""
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body>
+<p class="ti-art">Article 1</p>
+<p class="sti-art"> </p>
+<p class="normal">Member States shall take the necessary measures.</p>
+</body></html>"""
+    units = HtmlExtractor().extract("32001L0000", raw)
+    art = [u for u in units if u["type"] == "article"][0]
+    assert art["title"] is None
+    assert "necessary measures" in art["text"]

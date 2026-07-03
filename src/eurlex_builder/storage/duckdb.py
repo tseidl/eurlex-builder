@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
@@ -15,7 +16,7 @@ CREATE TABLE IF NOT EXISTS works (
     title VARCHAR,
     date_adopted DATE,
     document_type VARCHAR,
-    language VARCHAR DEFAULT 'eng',
+    language VARCHAR,
     full_text VARCHAR,
     full_text_original VARCHAR,
     full_text_html VARCHAR,
@@ -120,6 +121,22 @@ class DuckDBStore:
             if col not in works_cols:
                 self.conn.execute(f"ALTER TABLE works ADD COLUMN {col} {sql_type}")
 
+    @contextmanager
+    def _transaction(self):
+        """BEGIN/COMMIT with rollback on error, never masking the original
+        exception (a fatal error may have already aborted the transaction,
+        in which case ROLLBACK itself raises)."""
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            yield
+            self.conn.execute("COMMIT")
+        except Exception:
+            try:
+                self.conn.execute("ROLLBACK")
+            except Exception:
+                logger.debug("Rollback failed — transaction already aborted")
+            raise
+
     # --- Store protocol ---
 
     def save_work(self, work: dict) -> None:
@@ -147,7 +164,7 @@ class DuckDBStore:
                     work.get("title"),
                     work.get("date_adopted"),
                     work.get("document_type"),
-                    work.get("language", "eng"),
+                    work.get("language"),
                     work.get("full_text"),
                     work.get("full_text_original"),
                     work.get("full_text_html"),
@@ -166,7 +183,7 @@ class DuckDBStore:
                     work.get("title"),
                     work.get("date_adopted"),
                     work.get("document_type"),
-                    work.get("language", "eng"),
+                    work.get("language"),
                     work.get("full_text"),
                     work.get("full_text_original"),
                     work.get("full_text_html"),
@@ -177,39 +194,44 @@ class DuckDBStore:
     def save_text_units(self, celex_id: str, units: list[dict]) -> None:
         """Insert text units for a document, replacing any existing ones.
 
+        Runs as one transaction so a crash can't leave a document half-written.
         Persists `text_translated` when set by the extractor (e.g. the
         translate-before-extract fallback prefills it so the phase-2 translation
         step doesn't run a non-English model on already-English text).
         """
-        self.conn.execute("DELETE FROM text_units WHERE celex_id = ?", [celex_id])
-        for unit in units:
-            self.conn.execute(
-                """INSERT INTO text_units
-                   (id, celex_id, type, subtype, number, paragraph_num, point_letter, title, text, text_translated)
-                   VALUES (nextval('text_units_id_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
-                    celex_id,
-                    unit.get("type"),
-                    unit.get("subtype"),
-                    unit.get("number"),
-                    unit.get("paragraph_num"),
-                    unit.get("point_letter"),
-                    unit.get("title"),
-                    unit.get("text"),
-                    unit.get("text_translated"),
-                ],
-            )
+        rows = [
+            [
+                celex_id,
+                unit.get("type"),
+                unit.get("subtype"),
+                unit.get("number"),
+                unit.get("paragraph_num"),
+                unit.get("point_letter"),
+                unit.get("title"),
+                unit.get("text"),
+                unit.get("text_translated"),
+            ]
+            for unit in units
+        ]
+        with self._transaction():
+            self.conn.execute("DELETE FROM text_units WHERE celex_id = ?", [celex_id])
+            if rows:
+                self.conn.executemany(
+                    """INSERT INTO text_units
+                       (id, celex_id, type, subtype, number, paragraph_num, point_letter, title, text, text_translated)
+                       VALUES (nextval('text_units_id_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
 
     def save_eurovoc(self, celex_id: str, descriptors: list[dict]) -> None:
         """Insert EuroVoc descriptors for a document."""
         if not descriptors:
             return
         self.conn.execute("DELETE FROM eurovoc WHERE celex_id = ?", [celex_id])
-        for d in descriptors:
-            self.conn.execute(
-                "INSERT INTO eurovoc (celex_id, eurovoc_uri, eurovoc_label) VALUES (?, ?, ?)",
-                [celex_id, d.get("eurovoc_uri"), d.get("eurovoc_label")],
-            )
+        self.conn.executemany(
+            "INSERT INTO eurovoc (celex_id, eurovoc_uri, eurovoc_label) VALUES (?, ?, ?)",
+            [[celex_id, d.get("eurovoc_uri"), d.get("eurovoc_label")] for d in descriptors],
+        )
 
     def save_relations(self, relations: list[dict], *, celex_id: str | None = None) -> None:
         """Insert relation records for a document.
@@ -217,26 +239,44 @@ class DuckDBStore:
         When celex_id is provided, deletes only that document's existing
         relations before inserting. This avoids wiping enrichment-added
         relations (repeals, implicitly_repeals) for the original act when
-        processing a consolidated text that merges both sets.
+        processing a consolidated text that merges both sets — relations whose
+        source is NOT being deleted are instead deduplicated against the table.
         """
         if not relations:
             return
         if celex_id:
-            self.conn.execute("DELETE FROM relations WHERE source_celex = ?", [celex_id])
+            delete_ids = [celex_id]
         else:
-            source_ids = list({rel.get("source_celex") for rel in relations if rel.get("source_celex")})
-            for sid in source_ids:
-                self.conn.execute("DELETE FROM relations WHERE source_celex = ?", [sid])
+            delete_ids = sorted({rel.get("source_celex") for rel in relations if rel.get("source_celex")})
+
+        rows: list[tuple] = []
+        seen: set[tuple] = set()
         for rel in relations:
-            existing = self.conn.execute(
-                "SELECT 1 FROM relations WHERE source_celex = ? AND target_celex = ? AND relation_type = ?",
-                [rel.get("source_celex"), rel.get("target_celex"), rel.get("relation_type")],
-            ).fetchone()
-            if not existing:
-                self.conn.execute(
+            key = (rel.get("source_celex"), rel.get("target_celex"), rel.get("relation_type"))
+            if key not in seen:
+                seen.add(key)
+                rows.append(key)
+
+        other_ids = sorted({r[0] for r in rows if r[0]} - set(delete_ids))
+        if other_ids:
+            placeholders = ", ".join("?" for _ in other_ids)
+            existing = {
+                tuple(row)
+                for row in self.conn.execute(
+                    "SELECT source_celex, target_celex, relation_type FROM relations "
+                    f"WHERE source_celex IN ({placeholders})", other_ids,
+                ).fetchall()
+            }
+            rows = [r for r in rows if r not in existing]
+
+        with self._transaction():
+            for sid in delete_ids:
+                self.conn.execute("DELETE FROM relations WHERE source_celex = ?", [sid])
+            if rows:
+                self.conn.executemany(
                     """INSERT INTO relations (id, source_celex, target_celex, relation_type)
                        VALUES (nextval('relations_id_seq'), ?, ?, ?)""",
-                    [rel.get("source_celex"), rel.get("target_celex"), rel.get("relation_type")],
+                    [list(r) for r in rows],
                 )
 
     def get_content_report(self) -> list[tuple]:

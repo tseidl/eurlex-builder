@@ -12,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from SPARQLWrapper import SPARQLWrapper
 
-from eurlex_builder.utils import get_document_type, resolve_doc_type
+from eurlex_builder.utils import RateLimiter, get_document_type, resolve_doc_type
 
 logger = logging.getLogger("eurlex_builder")
 
@@ -29,14 +29,17 @@ _EXCLUDE_KEYWORDS = {"annexe", "annex", "cover", "erratum", "corrigendum"}
 DEFAULT_TIMEOUT = 20
 
 
-import threading
 import time
 
-# Simple rate limiter: minimum seconds between requests per session.
-_RATE_LIMIT_INTERVAL = 0.1  # ~10 requests/sec max
+# Minimum seconds between REST requests, shared across all threads (~10/sec).
+_rate_limiter = RateLimiter(0.1)
 
-_rate_lock = threading.Lock()
-_last_request_time = 0.0
+# Languages to try, in priority order (content fetch, PDF manifests, title fallback).
+LANGUAGE_CHAIN = ["eng", "fra", "deu", "ita", "nld", "spa"]
+
+# ISO 639-2 lowercase code → Cellar language-URI suffix, derived from the
+# chain so adding a language cannot desynchronize the two.
+_LANG_URI_SUFFIX = {lang: lang.upper() for lang in LANGUAGE_CHAIN}
 
 
 def _sparql_query(query: str, *, retries: int = 3, label: str = "SPARQL") -> dict | None:
@@ -55,17 +58,6 @@ def _sparql_query(query: str, *, retries: int = 3, label: str = "SPARQL") -> dic
             else:
                 logger.error("%s failed after %d attempts: %s", label, retries, exc)
                 return None
-
-
-def _rate_limit() -> None:
-    """Enforce a minimum interval between requests across all threads."""
-    global _last_request_time
-    with _rate_lock:
-        now = time.monotonic()
-        elapsed = now - _last_request_time
-        if elapsed < _RATE_LIMIT_INTERVAL:
-            time.sleep(_RATE_LIMIT_INTERVAL - elapsed)
-        _last_request_time = time.monotonic()
 
 
 def _create_session() -> requests.Session:
@@ -97,7 +89,10 @@ def _parse_value(value_obj: dict) -> str | int | float | bool | date | datetime:
         elif "decimal" in datatype or "double" in datatype or "float" in datatype:
             return float(value_string)
         elif "date" in datatype and "dateTime" not in datatype:
-            return datetime.strptime(value_string, "%Y-%m-%d").date()
+            try:
+                return datetime.strptime(value_string, "%Y-%m-%d").date()
+            except ValueError:
+                return value_string
         elif "dateTime" in datatype:
             try:
                 return datetime.fromisoformat(value_string.replace("Z", "+00:00"))
@@ -245,6 +240,21 @@ WHERE {{
             FILTER(STRENDS(STR(?lang), "ENG"))
         }}
         BIND("title" AS ?data_type)
+    }}
+    UNION
+    # title fallback: any-language titles, only when no English expression exists
+    {{
+        ?expression cdm:expression_belongs_to_work ?work .
+        ?expression cdm:expression_title ?t .
+        ?expression cdm:expression_uses_language ?l .
+        FILTER NOT EXISTS {{
+            ?e_eng cdm:expression_belongs_to_work ?work .
+            ?e_eng cdm:expression_uses_language ?lang_eng .
+            ?e_eng cdm:expression_title ?t_eng .
+            FILTER(STRENDS(STR(?lang_eng), "ENG"))
+        }}
+        BIND("title_fallback" AS ?data_type)
+        BIND(CONCAT(STR(?l), "|", ?t) AS ?value)
     }}
     UNION
     # document date
@@ -441,6 +451,7 @@ class CellarSource:
         bindings = result.get("results", {}).get("bindings", [])
 
         title = None
+        fallback_titles: dict[str, str] = {}
         date_adopted = None
         relations: list[dict] = []
         eurovoc: list[dict] = []
@@ -451,6 +462,10 @@ class CellarSource:
 
             if data_type == "title":
                 title = value
+            elif data_type == "title_fallback":
+                # Value format: "<language URI>|<title>"
+                lang_uri, _, t = str(value).partition("|")
+                fallback_titles[lang_uri.rsplit("/", 1)[-1]] = t
             elif data_type == "date":
                 date_adopted = value if isinstance(value, date) else None
             elif data_type == "eurovoc":
@@ -474,12 +489,25 @@ class CellarSource:
         self._cached_relations[celex_id] = relations
         self._cached_eurovoc[celex_id] = eurovoc
 
+        # No English title: fall back to another language, preferring the
+        # same order as the content-fetch language chain.
+        if title is None and fallback_titles:
+            for lang in self.LANGUAGE_CHAIN:
+                suffix = _LANG_URI_SUFFIX.get(lang, "")
+                if suffix in fallback_titles:
+                    title = fallback_titles[suffix]
+                    break
+            else:
+                title = min(fallback_titles.items())[1]
+
         return {
             "celex_id": celex_id,
             "title": title,
             "date_adopted": date_adopted,
             "document_type": get_document_type(celex_id),
-            "language": "eng",
+            # Set by the pipeline when content is fetched; stays NULL for
+            # documents whose content is unavailable.
+            "language": None,
             "full_text_html": None,
         }
 
@@ -487,8 +515,9 @@ class CellarSource:
     # Content
     # ------------------------------------------------------------------
 
-    # Languages to try, in priority order.
-    LANGUAGE_CHAIN = ["eng", "fra", "deu", "ita", "nld", "spa"]
+    # Languages to try, in priority order (module-level so the URI-suffix
+    # map derives from the same list).
+    LANGUAGE_CHAIN = LANGUAGE_CHAIN
 
     def fetch_content(
         self, celex_id: str
@@ -561,10 +590,6 @@ class CellarSource:
             return getattr(self, cache_key)
 
         encoded = quote(celex_id, safe="")
-        lang_map = {
-            "eng": "ENG", "fra": "FRA", "deu": "DEU",
-            "ita": "ITA", "nld": "NLD", "spa": "SPA",
-        }
 
         query = f"""
 PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>
@@ -586,7 +611,7 @@ SELECT ?manifest ?lang WHERE {{
                 lang_uri = b.get("lang", {}).get("value", "")
                 lang_suffix = lang_uri.split("/")[-1]
                 manifest_uri = b.get("manifest", {}).get("value", "")
-                for our_code, sparql_code in lang_map.items():
+                for our_code, sparql_code in _LANG_URI_SUFFIX.items():
                     if lang_suffix == sparql_code:
                         manifest_by_lang[our_code] = manifest_uri
 
@@ -604,7 +629,7 @@ SELECT ?manifest ?lang WHERE {{
         # Try DOC_1 through DOC_4 — some documents store the PDF at a higher index.
         for doc_n in range(1, 5):
             item_url = f"{manifest_uri}/DOC_{doc_n}"
-            _rate_limit()
+            _rate_limiter.wait()
             try:
                 resp = self.session.get(
                     item_url, headers={"Accept": "*/*"}, timeout=DEFAULT_TIMEOUT
@@ -835,7 +860,7 @@ WHERE {{
         self, url: str, headers: dict, celex_id: str
     ) -> bytes | None:
         """GET a URL, handling HTTP 300 Multiple Choices responses."""
-        _rate_limit()
+        _rate_limiter.wait()
         try:
             response = self.session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
         except requests.RequestException as exc:
@@ -854,7 +879,7 @@ WHERE {{
                 return None
 
             logger.debug("Following 300 redirect to: %s", selected_url)
-            _rate_limit()
+            _rate_limiter.wait()
             try:
                 response = self.session.get(
                     selected_url, headers=headers, timeout=DEFAULT_TIMEOUT
@@ -868,7 +893,8 @@ WHERE {{
                 return None
 
         if response.status_code == 200:
-            return response.content
+            # An empty 200 body is as useless as a 404.
+            return response.content or None
 
         if response.status_code in (403, 404):
             logger.debug(
@@ -877,16 +903,13 @@ WHERE {{
                 celex_id,
                 headers.get("Accept"),
             )
-            return None
-
-        if response.status_code >= 400:
+        else:
+            # Includes nested 300s and other unexpected statuses — never store
+            # a non-200 payload (e.g. a Multiple Choices page) as document content.
             logger.warning(
                 "HTTP %d for %s: %s", response.status_code, celex_id, response.reason
             )
-            return None
-
-        # Unexpected status — return content anyway.
-        return response.content
+        return None
 
     @staticmethod
     def _empty_metadata(celex_id: str) -> dict:
@@ -896,6 +919,6 @@ WHERE {{
             "title": None,
             "date_adopted": None,
             "document_type": get_document_type(celex_id),
-            "language": "eng",
+            "language": None,
             "full_text_html": None,
         }

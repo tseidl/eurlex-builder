@@ -2,6 +2,15 @@
 
 import pytest
 
+from eurlex_builder.storage.duckdb import DuckDBStore
+
+
+@pytest.fixture
+def store(tmp_path):
+    db = DuckDBStore(str(tmp_path / "test.duckdb"))
+    yield db
+    db.close()
+
 
 @pytest.fixture
 def sample_config_dict():

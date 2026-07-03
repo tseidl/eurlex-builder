@@ -1,9 +1,27 @@
-"""Shared utilities: CELEX validation, string normalization."""
+"""Shared utilities: CELEX validation, string normalization, rate limiting."""
 
 from __future__ import annotations
 
 import re
+import threading
+import time
 import unicodedata
+
+
+class RateLimiter:
+    """Enforce a minimum interval between calls, shared across all threads."""
+
+    def __init__(self, interval: float):
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            remaining = self._interval - (time.monotonic() - self._last)
+            if remaining > 0:
+                time.sleep(remaining)
+            self._last = time.monotonic()
 
 
 # Matches standard CELEX IDs like 32016R0679, 52005DC0229, 02016R0679-20210101
@@ -85,6 +103,10 @@ def get_document_type(celex_id: str) -> str:
 
 # Document types that have legislative structure (recitals, articles, annexes).
 STRUCTURAL_DOC_TYPES = frozenset({"regulation", "directive", "decision"})
+
+# Document types with COM-style prose structure (section headings + paragraphs).
+# Proposals and staff working documents share the COM HTML templates.
+COM_STYLE_DOC_TYPES = frozenset({"communication", "proposal", "staff working document"})
 
 
 # ---------------------------------------------------------------------------

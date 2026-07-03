@@ -80,6 +80,17 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
 
+def _require_db(db_path: str) -> None:
+    """Exit with an error if the DuckDB file doesn't exist.
+
+    Without this check, duckdb.connect() would silently create a new empty
+    database at a mistyped path.
+    """
+    from pathlib import Path
+    if not Path(db_path).exists():
+        sys.exit(f"Error: database file not found: {db_path}")
+
+
 def _run(config_path: str, *, resume: bool = False, retry_failed: bool = False) -> None:
     from eurlex_builder.pipeline import Pipeline
 
@@ -94,6 +105,7 @@ def _translate(
     translate_full_text: bool = True,
     translate_text_units: bool = True,
 ) -> None:
+    _require_db(db_path)
     import logging
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from eurlex_builder.translate import translate_database
@@ -106,6 +118,7 @@ def _translate(
 
 
 def _enrich(db_path: str, *, select: list[str], parallel: bool, max_workers: int, force: bool) -> None:
+    _require_db(db_path)
     import logging
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from eurlex_builder.enrich import enrich_database
@@ -115,6 +128,7 @@ def _enrich(db_path: str, *, select: list[str], parallel: bool, max_workers: int
 
 
 def _status(db_path: str) -> None:
+    _require_db(db_path)
     from eurlex_builder.storage.duckdb import DuckDBStore
 
     store = DuckDBStore(db_path)

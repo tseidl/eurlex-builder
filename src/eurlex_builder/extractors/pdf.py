@@ -269,6 +269,10 @@ _PDF_RECITAL_TAIL_OJ_RE = re.compile(
     re.DOTALL,
 )
 
+# OJ footnote line ("( 1 ) OJ L 169, 12.7.1993, p. 1.") — trailing noise
+# after the last annex, not annex content. Tolerates Docling's "( 1 )" spacing.
+_OJ_FOOTNOTE_LINE_RE = re.compile(r"^-?\s*\(\s*\d+\s*\)\s*OJ\b")
+
 
 def _pdf_classify_recital(text: str) -> str | None:
     """Short recital → subtype='subheading' (same rule as html extractor)."""
@@ -363,16 +367,46 @@ def _parse_legislative_markdown(
                 body, number=number, title=title, granularity=article_granularity,
             ))
 
+    def _start_annex(match: re.Match) -> dict:
+        # group(2) exists for the heading regex but not the bare regex.
+        try:
+            title = match.group(2).strip() or None
+        except IndexError:
+            title = None
+        return {
+            "type": "annex",
+            "number": match.group(1).strip() or None,
+            "title": title,
+            "text": "",
+            "_body": [],
+        }
+
+    def _match_annex(stripped: str) -> re.Match | None:
+        # "ANNEXES"/"Annexe(s)" are cover headings or references, not annex
+        # starts — without this guard "## ANNEXES" becomes an annex titled "ES".
+        if re.match(r"^#{0,3}\s*ANNEXE", stripped, re.IGNORECASE):
+            return None
+        return annex_heading_re.match(stripped) or annex_bare_re.match(stripped)
+
     for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
 
-        # "Done at <city>, <date>" signals the end of legislative content.
-        # Append the signature line itself once so strip_boilerplate can anchor
-        # on it, then discard everything that follows (annex tables, footnote
-        # lists, archival references) to avoid contaminating article bodies.
+        # "Done at <city>, <date>" signals the end of the enacting terms.
+        # Annexes follow the signature in the OJ layout, so keep collecting
+        # them; everything else after it (signatory names, footnote lists,
+        # archival references) is noise and gets discarded.
         if past_signature:
+            annex_match = _match_annex(stripped)
+            if annex_match:
+                _flush_recital()
+                _flush_article(current_article)
+                current_article = None
+                _flush(current_annex, units, include_annexes)
+                current_annex = _start_annex(annex_match)
+            elif current_annex is not None and not _OJ_FOOTNOTE_LINE_RE.match(stripped):
+                current_annex["_body"].append(stripped)
             continue
         if signature_re.match(stripped):
             past_signature = True
@@ -391,7 +425,7 @@ def _parse_legislative_markdown(
             continue
 
         art_match = art_heading_re.match(stripped) or art_bare_re.match(stripped)
-        annex_match = annex_heading_re.match(stripped) or annex_bare_re.match(stripped)
+        annex_match = _match_annex(stripped)
 
         if art_match:
             in_recital_zone = False
@@ -418,19 +452,7 @@ def _parse_legislative_markdown(
             current_article = None
             _flush(current_annex, units, include_annexes)
 
-            annex_number = annex_match.group(1).strip() or None
-            # group(2) exists for heading regex but not bare regex.
-            try:
-                annex_title = annex_match.group(2).strip() or None
-            except IndexError:
-                annex_title = None
-            current_annex = {
-                "type": "annex",
-                "number": annex_number,
-                "title": annex_title,
-                "text": "",
-                "_body": [],
-            }
+            current_annex = _start_annex(annex_match)
 
         elif current_annex is not None:
             current_annex["_body"].append(stripped)

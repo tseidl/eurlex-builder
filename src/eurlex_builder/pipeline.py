@@ -11,15 +11,22 @@ from tqdm import tqdm
 from eurlex_builder.config import Config, DescriptiveMode, FixedMode, load_config
 from eurlex_builder.protocols import Checkpoint, DataSource, Store, TextExtractor
 from eurlex_builder.utils import (
-    is_consolidated_celex, convert_consolidated_to_original, STRUCTURAL_DOC_TYPES,
+    is_consolidated_celex, convert_consolidated_to_original,
+    COM_STYLE_DOC_TYPES, STRUCTURAL_DOC_TYPES,
     strip_boilerplate,
 )
 
 logger = logging.getLogger("eurlex_builder")
 
 
+def _count_structural_units(units: list[dict]) -> int:
+    """Count recital/article/annex units — the fallback quality signal."""
+    return sum(1 for u in units if u.get("type") in ("recital", "article", "annex"))
+
+
 def _should_run_translate_fallback(
     units: list[dict], doc_type: str | None, language: str,
+    *, include_recitals: bool = True,
 ) -> bool:
     """Decide whether to translate the source markdown to English and re-extract.
 
@@ -27,6 +34,8 @@ def _should_run_translate_fallback(
       - the source language is not English (no translation needed otherwise),
       - the document is legislative (R/L/D) — recitals are mandatory drafting
         elements for these doc types,
+      - recitals are being extracted at all (with include_recitals=False the
+        recital count is always zero and says nothing about quality),
       - AND fewer than 3 recitals were extracted in the source language.
 
     Three recitals is the design threshold. Legislative acts almost always
@@ -38,6 +47,8 @@ def _should_run_translate_fallback(
     worked correctly for recitals.
     """
     if language == "eng":
+        return False
+    if not include_recitals:
         return False
     if doc_type not in ("regulation", "directive", "decision"):
         return False
@@ -227,9 +238,13 @@ class Pipeline:
                     celex_id = futures[future]
                     try:
                         result = future.result()
-                        # Sequential DB writes in main thread.
+                        # Sequential DB writes in main thread. save_text_units
+                        # runs even with zero units so a re-extraction that now
+                        # yields nothing clears the previous rows — but only
+                        # when content was actually fetched: a transient fetch
+                        # failure must not wipe previously extracted units.
                         self.store.save_work(result["metadata"])
-                        if result["units"]:
+                        if result["fetched"]:
                             self.store.save_text_units(celex_id, result["units"])
                         if result["relations"]:
                             self.store.save_relations(result["relations"], celex_id=celex_id)
@@ -319,10 +334,16 @@ class Pipeline:
         return None, metadata
 
     def _process_one(self, celex_id: str) -> None:
-        """Sequential: delegate to the shared core, then write to DB."""
+        """Sequential: delegate to the shared core, then write to DB.
+
+        save_text_units runs even with zero units so a re-extraction that now
+        yields nothing clears the previous rows — but only when content was
+        actually fetched: a transient fetch failure must not wipe previously
+        extracted units.
+        """
         result = self._fetch_and_extract(celex_id, self.source)
         self.store.save_work(result["metadata"])
-        if result["units"]:
+        if result["fetched"]:
             self.store.save_text_units(celex_id, result["units"])
         if result["relations"]:
             self.store.save_relations(result["relations"], celex_id=celex_id)
@@ -384,38 +405,62 @@ class Pipeline:
                         units = pdf_units
                         language = pdf_lang
                         extract_meta = pdf_meta
-                        metadata["content_source"] = "cellar_pdf_fallback"
+                        metadata["content_source"] = f"cellar_pdf_{pdf_lang}_fallback"
+                        metadata["language"] = pdf_lang
+                        # Keep full_text consistent with the adopted language —
+                        # otherwise the translation phase would run a
+                        # non-English model over the English HTML text.
+                        metadata["full_text"] = self._extract_full_text(pdf_raw, pdf_result)
+                        metadata["full_text_html"] = None
 
             # Translate-before-extract fallback for non-English legislative PDFs
             # where the source-language parser produced little or no structural
             # content (English-only markers don't fire on French/German/Italian PDFs).
             if (
-                _should_run_translate_fallback(units, doc_type, language)
+                _should_run_translate_fallback(
+                    units, doc_type, language,
+                    include_recitals=text_cfg.include_recitals,
+                )
                 and extract_meta.get("markdown")
             ):
                 translated = _safe_translate_markdown(
                     extract_meta["markdown"], language, celex_id,
                 )
                 if translated:
-                    from eurlex_builder.extractors.pdf import _parse_legislative_markdown
-                    logger.info(
-                        "Translate-before-extract fallback for %s (%s → eng): "
-                        "source-lang produced %d structural units; re-parsing translated markdown.",
-                        celex_id, language,
-                        sum(1 for u in units if u.get("type") in ("recital", "article", "annex")),
+                    from eurlex_builder.extractors.pdf import (
+                        _clean_pdf_artifacts,
+                        _parse_legislative_markdown,
                     )
-                    units = _parse_legislative_markdown(
+                    translated_units = _parse_legislative_markdown(
                         translated,
                         include_recitals=text_cfg.include_recitals,
                         include_articles=text_cfg.include_articles,
                         include_annexes=text_cfg.include_annexes,
                         article_granularity=text_cfg.article_granularity,
                     )
-                    # Prefill text_translated so phase-2 doesn't re-translate.
-                    for u in units:
-                        u["text_translated"] = u.get("text")
-                    cs = metadata.get("content_source") or ""
-                    metadata["content_source"] = f"{cs}__translated"
+                    for u in translated_units:
+                        u["text"] = _clean_pdf_artifacts(u["text"])
+                        # Prefill text_translated so phase-2 doesn't re-translate.
+                        u["text_translated"] = u["text"]
+                    # Only adopt the translated parse when it actually found
+                    # more structure — a garbled translation must not replace
+                    # a partially successful source-language extraction.
+                    if _count_structural_units(translated_units) > _count_structural_units(units):
+                        logger.info(
+                            "Translate-before-extract fallback for %s (%s → eng): "
+                            "%d structural units (was %d from source language).",
+                            celex_id, language,
+                            _count_structural_units(translated_units),
+                            _count_structural_units(units),
+                        )
+                        units = translated_units
+                        cs = metadata.get("content_source") or ""
+                        metadata["content_source"] = f"{cs}__translated"
+                    else:
+                        logger.info(
+                            "Translate-before-extract fallback for %s did not improve "
+                            "extraction — keeping source-language units.", celex_id,
+                        )
 
             # Consolidated text: fetch original recitals.
             if (
@@ -426,8 +471,9 @@ class Pipeline:
                 original_units = self._fetch_original_recitals_with_source(celex_id, source)
                 units = original_units + [u for u in units if u["type"] != "recital"]
 
-        # Paragraph extraction for communications.
-        elif raw_content and doc_type == "communication":
+        # Paragraph extraction for communications, proposals, and staff
+        # working documents — all share the COM prose templates.
+        elif raw_content and doc_type in COM_STYLE_DOC_TYPES:
             units = self._extract_com_units(celex_id, raw_content)
 
         # Strip boilerplate from last article, drop empty units.
@@ -461,6 +507,10 @@ class Pipeline:
             "units": units,
             "relations": relations,
             "eurovoc": eurovoc,
+            # False on a fetch failure — the caller must then NOT clear the
+            # document's existing text_units (empty units would mean "the
+            # network failed", not "the document has no content").
+            "fetched": raw_content is not None,
         }
 
     @staticmethod
@@ -616,13 +666,16 @@ class Pipeline:
         raw, _, _ = fetch_result
         for extractor in self.extractors:
             if extractor.can_handle(raw):
-                return extractor.extract(
+                extracted = extractor.extract(
                     consolidated_celex,
                     raw,
                     include_recitals=True,
                     include_articles=False,
                     include_annexes=False,
                 )
+                # The extractors fall back to a whole-document "body" unit when
+                # they find no structure — that must not leak into the merge.
+                return [u for u in extracted if u.get("type") == "recital"]
         return []
 
     def _report_missing_content(self) -> None:

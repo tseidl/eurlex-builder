@@ -6,12 +6,14 @@ We fetch documents from the EU Cellar API (not scraping EUR-Lex). Metadata comes
 
 ## How we extract text from HTML
 
-We detect which of four HTML structures the document uses, based on CSS classes and div IDs:
+We detect which of six HTML structures the document uses, based on CSS classes and div IDs:
 
 - **Standard OJ** (modern docs): articles in `<div id="art_1">`, recitals in `<div id="rct_1">`, annexes in `<div id="anx_I">`
 - **Manual CSS** (pre-2010): articles marked by `<p class="Titrearticle">`, recitals by `<p class="li ManualConsidrant">`
 - **Class-based OJ** (1970s-1990s formatted): articles in `<p class="ti-art">`, recitals as `<p class="normal">` starting with "Whereas"
 - **Text-only** (oldest): all content in a `<div id="TexteOnly">`, parsed sequentially — "Whereas" lines are recitals, "Article N" headings start articles. Handles both old-style (`Whereas [text]`) and modern (`Whereas:` followed by `(1)`, `(2)`) recital formats.
+- **Consolidated-norm** (2017+ consolidated texts): articles marked by `<p class="title-article-norm">`, body in `class="norm"` elements
+- **Classless fallback** (early-2000s consolidated texts): bare `<body>` with plain `<p>` tags and no CSS classes, parsed with the text-only sequential logic
 
 If no structure is recognized or extraction yields zero recitals + articles, we fall back to PDF (if available) or extract the full body as a single text unit.
 

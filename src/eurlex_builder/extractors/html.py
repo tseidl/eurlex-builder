@@ -1,9 +1,12 @@
 """HTML text extractor for EUR-Lex documents.
 
-Handles three EUR-Lex HTML structures:
+Handles six EUR-Lex HTML structures:
 - Standard OJ format (structured divs with class markers)
 - Manual CSS format (older documents with inline styles)
+- Class-based OJ format (p elements with ti-art / oj-ti-art classes)
 - Text-only format (minimal structure, TexteOnly div)
+- Consolidated-norm format (title-article-norm / norm classes)
+- Classless fallback (bare <body> without CSS classes)
 """
 
 from __future__ import annotations
@@ -619,9 +622,16 @@ def _extract_class_based_articles(tree, *, granularity: str = "article") -> list
         elif re.search(r"Sole\s+Article", title_text, re.IGNORECASE):
             number = "sole"
 
+        # Article subtitle ("Scope", "Definitions", …) sits in the next
+        # sibling with class sti-art — it's the title, not body text.
+        article_title = None
+        sibling = p.getnext()
+        if sibling is not None and sibling.get("class", "") in ("sti-art", "oj-sti-art"):
+            article_title = _extract_text(sibling).strip() or None
+            sibling = sibling.getnext()
+
         # Collect body: following siblings until a stop class.
         body_parts: list[str] = []
-        sibling = p.getnext()
         while sibling is not None:
             sib_class = sibling.get("class", "")
             if sib_class in _CLASS_STOP:
@@ -631,9 +641,14 @@ def _extract_class_based_articles(tree, *, granularity: str = "article") -> list
                 body_parts.append(part)
             sibling = sibling.getnext()
 
+        # A subtitle with no body is the article's only content — keep it as
+        # body text so the row isn't dropped as empty downstream.
+        if article_title and not body_parts:
+            body_parts, article_title = [article_title], None
+
         if body_parts or number:
             units.extend(split_article(
-                body_parts, number=number, title=None, granularity=granularity,
+                body_parts, number=number, title=article_title, granularity=granularity,
             ))
     return units
 
@@ -814,6 +829,49 @@ _CHAPTER_HEADING_RE = re.compile(
 
 _CONSOLIDATED_MARKER_RE = re.compile(r"^[▼►▲◄]\s*[A-Z]\d*$")
 
+# OJ footnote line ("( 1 ) OJ No L 169, 12.7.1993, p. 1.") — trailing noise
+# after the last annex, not annex content.
+_OJ_FOOTNOTE_LINE_RE = re.compile(r"^\(\s*\d+\s*\)\s*OJ\b")
+
+_ANNEX_HEADING_RE = re.compile(r"^ANNEX\s*([IVXLCDMivxlcdm0-9]*)\s*(.*)", re.IGNORECASE)
+_ANNEX_INLINE_CONTINUATION_RE = re.compile(
+    r"(?:[A-Za-z]\s+|\([A-Za-z0-9]+\)\s*)?(?:to |of |the |is |shall |and |in |for |,)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_article_title(text: str) -> bool:
+    """Heuristic: is this line an article title ("Scope", "Definitions")?
+
+    Applied only to the first line after a bare "Article N" heading in
+    classless/text-only HTML. Titles are short capitalized lines without
+    sentence punctuation; body text is either numbered ("1. …") or a full
+    sentence ending in a period/colon. Conservative: a missed title stays in
+    the body, which is the pre-existing behavior.
+    """
+    t = text.strip()
+    if not t or len(t) > 60 or "." in t:
+        return False
+    if t[-1] in ":;,-":
+        return False
+    return t[0].isupper()
+
+
+def _match_annex_heading(text: str) -> re.Match | None:
+    """Match an ANNEX section heading; reject inline references.
+
+    "Annexes" / French "Annexe" are always inline references, as is a
+    remainder that reads like a sentence continuation ("Annex I to Directive…").
+    """
+    m = _ANNEX_HEADING_RE.match(text)
+    if not m:
+        return None
+    if text[:7].lower().startswith("annexe"):
+        return None
+    if _ANNEX_INLINE_CONTINUATION_RE.match(m.group(2).strip()):
+        return None
+    return m
+
 
 def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                        include_annexes: bool,
@@ -874,12 +932,66 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
     past_signature = False
     skip_next_caps = False
 
+    def _start_annex(match: re.Match) -> dict:
+        return {
+            "type": "annex",
+            "number": match.group(1).strip() or None,
+            "title": match.group(2).strip() or None,
+            "text": "",
+            "_body": [],
+        }
+
+    def _flush_current_article() -> None:
+        nonlocal current_article
+        if current_article is not None:
+            if include_articles:
+                body = current_article["_body"]
+                title = current_article.get("title")
+                # A title with no body is a one-line article ("Repealed")
+                # that the title heuristic misread — demote it back to body
+                # text so the row isn't dropped as empty downstream.
+                if title and not body:
+                    body, title = [title], None
+                units.extend(split_article(
+                    body,
+                    number=current_article.get("number"),
+                    title=title,
+                    granularity=article_granularity,
+                ))
+            current_article = None
+
+    def _flush_current_annex() -> None:
+        nonlocal current_annex
+        if current_annex is not None:
+            if include_annexes:
+                current_annex["text"] = " ".join(current_annex["_body"])
+                del current_annex["_body"]
+                units.append(current_annex)
+            current_annex = None
+
     for idx, text in enumerate(raw_texts):
         if not text:
             continue
 
-        # If already past the signature block, discard all subsequent content.
+        # Past the signature block: annexes follow it in the OJ layout, so
+        # keep collecting them; everything else (names, footnote lists,
+        # archival references) is noise and gets discarded.
         if past_signature:
+            annex_match = _match_annex_heading(text)
+            if annex_match:
+                _flush_current_article()
+                _flush_current_annex()
+                current_annex = _start_annex(annex_match)
+            elif current_annex is not None:
+                # Annex content continues, but OJ footnote lists, chapter
+                # headings, and consolidated markers stay out of annex text —
+                # the same filtering pre-signature annexes get.
+                if not (
+                    _OJ_FOOTNOTE_LINE_RE.match(text)
+                    or _CHAPTER_HEADING_RE.match(text)
+                    or _CONSOLIDATED_MARKER_RE.match(text)
+                ):
+                    current_annex["_body"].append(text)
             continue
 
         if _signature_re.match(text):
@@ -944,33 +1056,12 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                 ):
                     art_match = None
 
-        # Match "ANNEX", "ANNEX I", "ANNEX 1", etc. but not "Annexes" (always inline)
-        # or inline references like "Annex A to Regulation ...".
-        annex_match = re.match(r"^ANNEX\s*([IVXLCDMivxlcdm0-9]*)\s*(.*)", text, re.IGNORECASE)
-        if annex_match and text[:7].lower().startswith("annexe"):
-            annex_match = None  # "Annexes" / "Annexe" = inline reference
-        if annex_match:
-            remainder = annex_match.group(2).strip()
-            # If remainder looks like a sentence continuation, it's inline text.
-            if re.match(r"(?:[A-Za-z]\s+|\([A-Za-z0-9]+\)\s*)?(?:to |of |the |is |shall |and |in |for |,)", remainder, re.IGNORECASE):
-                annex_match = None
+        annex_match = _match_annex_heading(text)
 
         if art_match:
             in_recital_zone = False
-            # Flush previous article/annex.
-            if current_article and include_articles:
-                units.extend(split_article(
-                    current_article["_body"],
-                    number=current_article.get("number"),
-                    title=current_article.get("title"),
-                    granularity=article_granularity,
-                ))
-            if current_annex:
-                if include_annexes:
-                    current_annex["text"] = " ".join(current_annex["_body"])
-                    del current_annex["_body"]
-                    units.append(current_annex)
-                current_annex = None
+            _flush_current_article()
+            _flush_current_annex()
 
             current_article = {
                 "type": "article",
@@ -987,37 +1078,22 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
 
         elif annex_match:
             in_recital_zone = False
-            # Flush previous article/annex.
-            if current_article:
-                if include_articles:
-                    units.extend(split_article(
-                        current_article["_body"],
-                        number=current_article.get("number"),
-                        title=current_article.get("title"),
-                        granularity=article_granularity,
-                    ))
-                current_article = None
-            if current_annex:
-                if include_annexes:
-                    current_annex["text"] = " ".join(current_annex["_body"])
-                    del current_annex["_body"]
-                    units.append(current_annex)
-
-            annex_number = annex_match.group(1).strip() or None
-            annex_title = annex_match.group(2).strip() or None
-            current_annex = {
-                "type": "annex",
-                "number": annex_number,
-                "title": annex_title,
-                "text": "",
-                "_body": [],
-            }
+            _flush_current_article()
+            _flush_current_annex()
+            current_annex = _start_annex(annex_match)
 
         elif current_annex is not None:
             current_annex["_body"].append(text)
 
         elif current_article is not None:
-            current_article["_body"].append(text)
+            if (
+                not current_article["_body"]
+                and current_article["title"] is None
+                and _looks_like_article_title(text)
+            ):
+                current_article["title"] = text
+            else:
+                current_article["_body"].append(text)
 
         elif text.strip().rstrip(":").upper() == "WHEREAS":
             # "Whereas:" marker — enter modern numbered recital zone.
@@ -1103,22 +1179,9 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                         "text": cleaned,
                     })
 
-    # Flush trailing article/annex (always clear state, only append if included).
-    if current_article:
-        if include_articles:
-            units.extend(split_article(
-                current_article["_body"],
-                number=current_article.get("number"),
-                title=current_article.get("title"),
-                granularity=article_granularity,
-            ))
-        current_article = None
-    if current_annex:
-        if include_annexes:
-            current_annex["text"] = " ".join(current_annex["_body"])
-            del current_annex["_body"]
-            units.append(current_annex)
-        current_annex = None
+    # Flush trailing article/annex.
+    _flush_current_article()
+    _flush_current_annex()
 
     return units
 
@@ -1272,6 +1335,24 @@ _COM_SIGNATURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Signature blocks are short standalone lines ("Done at Brussels, 3.5.2021",
+# "For the Commission", "The President"). Body prose can legitimately start
+# with the same words ("The President of the European Council stressed…"),
+# so a match only counts as a signature when the whole paragraph is short
+# AND the signature phrase isn't continued by a lowercase word ("The
+# President concluded.").
+_COM_SIGNATURE_MAX_LEN = 40
+
+
+def _is_com_signature(text: str) -> bool:
+    if len(text) >= _COM_SIGNATURE_MAX_LEN:
+        return False
+    m = _COM_SIGNATURE_RE.match(text)
+    if not m:
+        return False
+    rest = text[m.end():].lstrip(" ,.")
+    return not rest[:1].islower()
+
 
 def _extract_com_modern(tree) -> list[dict]:
     """Extract paragraphs from modern/transitional COM XHTML with CSS classes."""
@@ -1362,7 +1443,7 @@ def _extract_com_modern(tree) -> list[dict]:
             # still captures the tail.
             if past_signature:
                 continue
-            if _COM_SIGNATURE_RE.match(text):
+            if _is_com_signature(text):
                 past_signature = True
                 continue
 

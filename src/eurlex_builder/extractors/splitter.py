@@ -38,11 +38,14 @@ _PARA_MARKER_LENIENT = re.compile(
     r"(?:^|\n|(?<=[.!?:;])\s+)(\d+[a-z]?)\s*\.\s+(?=\S)"
 )
 
-# Lettered point marker: "(a) ", "(b) ", ... ONLY anchored to start-of-line.
-# Inline cross-references like "point (f) of paragraph 1" must NOT match.
-# This relies on structural newlines between source elements being preserved.
+# Lettered point marker: "(a) ", "(b) ", "(aa) " ... ONLY anchored to
+# start-of-line. Inline cross-references like "point (f) of paragraph 1" must
+# NOT match. This relies on structural newlines between source elements being
+# preserved. Candidates are further validated against the drafting sequence
+# (see _filter_point_sequence) so roman sub-points "(i)", "(ii)" inside a
+# point stay part of that point.
 _POINT_MARKER = re.compile(
-    r"(?:^|\n)\s*\(([a-z])\)\s+(?=\S)"
+    r"(?:^|\n)\s*\(([a-z]{1,2})\)\s+(?=\S)"
 )
 
 # Heuristic: is this article an "Amendments to Regulation X" article?
@@ -66,6 +69,25 @@ _REPLACEMENT_INTRO = re.compile(
 _QUOTED_BLOCK_OPEN = re.compile(r":\s*([\'‘\"“«])")
 _CLOSE_QUOTE_FOR = {"'": "'", "‘": "’", '"': '"', "“": "”", "«": "»"}
 
+# A close-quote candidate only ends the region when followed by punctuation,
+# a newline, or end-of-text (OJ convention: quoted blocks end with ’. ’; ’,).
+# The same characters appear as apostrophes ("Member States’ obligations"),
+# where the next character is a space or letter — those must not close.
+_PUNCT_AFTER_CLOSE = ".,;:)\n"
+
+
+def _find_close_quote(text: str, start: int, close_q: str) -> int:
+    """Find the first close-quote that isn't a word-internal apostrophe."""
+    pos = start
+    while True:
+        idx = text.find(close_q, pos)
+        if idx == -1:
+            return -1
+        following = text[idx + 1 : idx + 2]
+        if not following or following in _PUNCT_AFTER_CLOSE:
+            return idx
+        pos = idx + 1
+
 
 def _find_quoted_regions(text: str) -> list[tuple[int, int]]:
     """Find quoted-replacement regions in text. Returns list of (start, end)."""
@@ -77,8 +99,17 @@ def _find_quoted_regions(text: str) -> list[tuple[int, int]]:
             break
         open_q = m.group(1)
         close_q = _CLOSE_QUOTE_FOR[open_q]
-        close_idx = text.find(close_q, m.end())
+        close_idx = _find_close_quote(text, m.end(), close_q)
         if close_idx == -1:
+            # No punctuation-gated close. If the close character occurs at
+            # all, this is an inline quoted term ("known as: ‘Erasmus+’ and
+            # shall…") — close there rather than swallowing the rest of the
+            # article and suppressing its paragraph markers.
+            close_idx = text.find(close_q, m.end())
+        if close_idx == -1:
+            # The quote genuinely never closes: after ": ‘" everything that
+            # follows is replacement content.
+            regions.append((m.end() - 1, len(text)))
             break
         # Region covers the open quote position through one past the close.
         regions.append((m.end() - 1, close_idx + 1))
@@ -88,6 +119,49 @@ def _find_quoted_regions(text: str) -> list[tuple[int, int]]:
 
 def _is_in_quoted_region(pos: int, regions: list[tuple[int, int]]) -> bool:
     return any(s <= pos < e for s, e in regions)
+
+
+def _point_key(letter: str) -> int | None:
+    """Ordering key for point letters: (a)=100, (aa)=101, (ab)=102, (b)=200 …
+
+    Amendment-inserted points sort between their base letter and the next.
+    Two-letter markers with a suffix beyond 'c' — (ii), (iv), (ix), … — are
+    roman sub-points, not insertions, and get no key.
+    """
+    if len(letter) == 2 and letter[1] > "c":
+        return None
+    key = (ord(letter[0]) - ord("a") + 1) * 100
+    if len(letter) == 2:
+        key += ord(letter[1]) - ord("a") + 1
+    return key
+
+
+def _filter_point_sequence(matches: list) -> list:
+    """Keep only markers that form a plausible point sequence.
+
+    Points are an ordered list, but amendments insert letters ((aa) between
+    (a) and (b)) and delete them, and extractors sometimes lose the first
+    marker into the stem text. So: the sequence must start at (a), (aa), or
+    (b), and each following marker must be strictly ahead of the last kept
+    one by at most three base letters (gap tolerance for deleted points).
+    Roman sub-points — (ii), (iv), or an (i) far from its neighbours — fail
+    these rules and stay inside their parent point's text; a genuine point
+    (i) directly after (h) still validates.
+    """
+    kept: list = []
+    last_key = 0
+    for m in matches:
+        key = _point_key(m.group(1))
+        if key is None:
+            continue
+        if not kept:
+            if key <= 200:
+                kept.append(m)
+                last_key = key
+        elif 0 < key - last_key <= 300:
+            kept.append(m)
+            last_key = key
+    return kept
 
 
 def _make_unit(
@@ -177,16 +251,22 @@ def _split_paragraph_into_points(
     Returns None when no point structure detected.
     """
     quoted = _find_quoted_regions(para_text)
-    matches = [
+    matches = _filter_point_sequence([
         m for m in _POINT_MARKER.finditer(para_text)
         if not _is_in_quoted_region(m.start(), quoted)
-    ]
+    ])
     if len(matches) < 2:
         return None
 
-    # Subparagraph boundary marker: newline followed by a non-point line.
-    # Used only to detect content AFTER the last point.
-    subpara_start_re = re.compile(r"\n\s*(?!\([a-z]\)\s+)(?=\S)")
+    # Subparagraph boundary marker: a sentence-ending line followed by an
+    # uppercase-starting non-point line. Used only to detect content AFTER
+    # the last point. Both conditions are needed to distinguish a genuine
+    # trailing subparagraph ("…obligation.\nPoint (f) of the first
+    # subparagraph shall not apply…") from a wrapped continuation of the
+    # last point — whether lowercase ("…compliance\nwith a legal obligation")
+    # or capitalized ("…in accordance with\nRegulation (EU) 2016/679") —
+    # which must stay inside the point.
+    subpara_start_re = re.compile(r"(?<=[.;:!?])\n\s*(?!\([a-z]{1,2}\)\s+)(?=[A-Z0-9])")
 
     units: list[dict] = []
 

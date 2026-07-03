@@ -30,3 +30,15 @@ def test_document_type():
     assert get_document_type("32000L0031") == "directive"
     assert get_document_type("52005DC0229") == "communication"
     assert get_document_type("32021D2034") == "decision"
+
+
+def test_rate_limiter_enforces_interval_across_calls():
+    import time
+    from eurlex_builder.utils import RateLimiter
+
+    limiter = RateLimiter(0.05)
+    start = time.monotonic()
+    limiter.wait()
+    limiter.wait()
+    limiter.wait()
+    assert time.monotonic() - start >= 0.09

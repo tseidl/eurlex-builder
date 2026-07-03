@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import polars as pl
-
 logger = logging.getLogger("eurlex_builder")
 
 TABLES = ["works", "text_units", "relations", "eurovoc"]
@@ -21,13 +19,10 @@ def export_tables(conn, output_dir: str, formats: list[str]) -> None:
     conn.execute("SET arrow_large_buffer_size = true")
 
     for table in TABLES:
-        # Use DuckDB's native Arrow export for reliable type handling.
-        arrow_table = conn.execute(f"SELECT * FROM {table}").fetch_arrow_table()
-        df = pl.from_arrow(arrow_table)
-
-        if df.is_empty():
-            logger.debug(f"Skipping empty table: {table}")
-            continue
+        # DuckDB's native Polars export (via Arrow) for reliable type handling.
+        # Empty tables are exported too (with their schema) so downstream
+        # code can rely on all four files existing.
+        df = conn.execute(f"SELECT * FROM {table}").pl()
 
         if "parquet" in formats:
             path = out / f"{table}.parquet"

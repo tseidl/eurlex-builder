@@ -1,14 +1,4 @@
-"""Tests for DuckDB checkpoint functionality."""
-
-import pytest
-from eurlex_builder.storage.duckdb import DuckDBStore
-
-
-@pytest.fixture
-def store(tmp_path):
-    db = DuckDBStore(str(tmp_path / "test.duckdb"))
-    yield db
-    db.close()
+"""Tests for DuckDB checkpoint functionality. Uses the shared store fixture."""
 
 
 def test_checkpoint_round_trip(store):

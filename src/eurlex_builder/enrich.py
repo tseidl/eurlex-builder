@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
 from urllib.parse import quote
+
+from eurlex_builder.utils import RateLimiter
 
 logger = logging.getLogger("eurlex_builder")
 
-# Minimum interval between SPARQL requests (seconds).
-_SPARQL_INTERVAL = 0.15
+# Minimum interval between SPARQL requests (seconds), shared across all
+# workers — a per-thread sleep would multiply the rate by the worker count.
+_sparql_limiter = RateLimiter(0.15)
 
 # Multi-valued scalar fields — joined with "; " when multiple values returned.
 _MULTI_VALUED = {"author", "subject_matter"}
@@ -130,12 +131,17 @@ WHERE {{
 
 
 def _enrich_one(celex_id: str, query: str) -> dict:
-    """Run enrichment SPARQL for one document, return parsed results."""
+    """Run enrichment SPARQL for one document, return parsed results.
+
+    `ok` is False when the query itself failed — the caller must then skip
+    the save entirely (an empty result from a FAILED query must not be
+    mistaken for "this document has no descriptors").
+    """
     from eurlex_builder.sources.cellar import _sparql_query, _parse_value
 
     result = _sparql_query(query, label=f"Enrich {celex_id}")
     if result is None:
-        return {"celex_id": celex_id, "metadata": {}, "relations": [], "eurovoc": []}
+        return {"celex_id": celex_id, "metadata": {}, "relations": [], "eurovoc": [], "ok": False}
 
     bindings = result.get("results", {}).get("bindings", [])
 
@@ -189,6 +195,7 @@ def _enrich_one(celex_id: str, query: str) -> dict:
         "metadata": collapsed,
         "relations": relations,
         "eurovoc": eurovoc,
+        "ok": True,
     }
 
 
@@ -250,7 +257,7 @@ def enrich_database(
     ev_count = 0
 
     def process_one(celex_id: str) -> dict:
-        time.sleep(_SPARQL_INTERVAL)
+        _sparql_limiter.wait()
         query = _build_enrich_query(celex_id, categories)
         return _enrich_one(celex_id, query)
 
@@ -264,6 +271,10 @@ def enrich_database(
                 except Exception as exc:
                     logger.warning("Enrichment failed for %s: %s", celex_id, exc)
                     continue
+                if not result["ok"]:
+                    # Not marked enriched — picked up again on the next run.
+                    logger.warning("Enrichment query failed for %s — skipping save.", celex_id)
+                    continue
                 counts = _save_enrichment(conn, result, categories)
                 enriched_count += 1
                 rel_count += counts[0]
@@ -274,6 +285,10 @@ def enrich_database(
                 result = process_one(celex_id)
             except Exception as exc:
                 logger.warning("Enrichment failed for %s: %s", celex_id, exc)
+                continue
+            if not result["ok"]:
+                # Not marked enriched — picked up again on the next run.
+                logger.warning("Enrichment query failed for %s — skipping save.", celex_id)
                 continue
             counts = _save_enrichment(conn, result, categories)
             enriched_count += 1
@@ -288,65 +303,73 @@ def enrich_database(
 
 
 def _save_enrichment(conn, result: dict, categories: set[str]) -> tuple[int, int]:
-    """Write enrichment results to DB. Returns (relations_added, eurovoc_added)."""
+    """Write enrichment results to DB. Returns (relations_added, eurovoc_added).
+
+    Runs as one transaction so `enriched_at` is committed atomically with the
+    data writes — an interrupt can't leave a document marked enriched with
+    its descriptors deleted.
+    """
     celex_id = result["celex_id"]
     metadata = result["metadata"]
     relations = result["relations"]
     eurovoc = result["eurovoc"]
 
-    # Update scalar metadata columns.
-    if metadata and "metadata" in categories:
-        set_clauses = []
-        values = []
-        for field in _METADATA_FIELDS:
-            if field in metadata:
-                set_clauses.append(f"{field} = ?")
-                values.append(metadata[field])
-        if set_clauses:
+    rel_added = 0
+    ev_added = 0
+
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        # Update scalar metadata columns.
+        if metadata and "metadata" in categories:
+            set_clauses = []
+            values = []
+            for field in _METADATA_FIELDS:
+                if field in metadata:
+                    set_clauses.append(f"{field} = ?")
+                    values.append(metadata[field])
             set_clauses.append("enriched_at = current_timestamp")
             sql = f"UPDATE works SET {', '.join(set_clauses)} WHERE celex_id = ?"
             values.append(celex_id)
             conn.execute(sql, values)
         else:
-            # No metadata found, but still mark as enriched.
+            # No metadata found (or not requested), but still mark as enriched.
             conn.execute(
                 "UPDATE works SET enriched_at = current_timestamp WHERE celex_id = ?",
                 [celex_id],
             )
-    else:
-        conn.execute(
-            "UPDATE works SET enriched_at = current_timestamp WHERE celex_id = ?",
-            [celex_id],
-        )
 
-    # Insert new relation types (don't duplicate existing ones).
-    rel_added = 0
-    if relations and "relations" in categories:
-        for rel in relations:
-            existing = conn.execute(
-                "SELECT 1 FROM relations WHERE source_celex = ? AND target_celex = ? AND relation_type = ?",
-                [rel["source_celex"], rel["target_celex"], rel["relation_type"]],
-            ).fetchone()
-            if not existing:
-                conn.execute(
-                    "INSERT INTO relations (id, source_celex, target_celex, relation_type) "
-                    "VALUES (nextval('relations_id_seq'), ?, ?, ?)",
+        # Insert new relation types (don't duplicate existing ones).
+        if relations and "relations" in categories:
+            for rel in relations:
+                existing = conn.execute(
+                    "SELECT 1 FROM relations WHERE source_celex = ? AND target_celex = ? AND relation_type = ?",
                     [rel["source_celex"], rel["target_celex"], rel["relation_type"]],
-                )
-                rel_added += 1
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        "INSERT INTO relations (id, source_celex, target_celex, relation_type) "
+                        "VALUES (nextval('relations_id_seq'), ?, ?, ?)",
+                        [rel["source_celex"], rel["target_celex"], rel["relation_type"]],
+                    )
+                    rel_added += 1
 
-    # Insert EuroVoc descriptors (skip if already populated for this doc).
-    ev_added = 0
-    if eurovoc and "eurovoc" in categories:
-        existing_count = conn.execute(
-            "SELECT count(*) FROM eurovoc WHERE celex_id = ?", [celex_id]
-        ).fetchone()[0]
-        if existing_count == 0:
-            for d in eurovoc:
-                conn.execute(
+        # Replace EuroVoc descriptors. The query succeeded (callers gate on
+        # result["ok"]), so an empty list means the document genuinely has
+        # none — stale rows must go too.
+        if "eurovoc" in categories:
+            conn.execute("DELETE FROM eurovoc WHERE celex_id = ?", [celex_id])
+            if eurovoc:
+                conn.executemany(
                     "INSERT INTO eurovoc (celex_id, eurovoc_uri, eurovoc_label) VALUES (?, ?, ?)",
-                    [celex_id, d["eurovoc_uri"], d["eurovoc_label"]],
+                    [[celex_id, d["eurovoc_uri"], d["eurovoc_label"]] for d in eurovoc],
                 )
-                ev_added += 1
+                ev_added = len(eurovoc)
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            logger.debug("Rollback failed — transaction already aborted")
+        raise
 
     return rel_added, ev_added

@@ -13,7 +13,7 @@ The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis
 ## Highlights
 
 - **Sub-article granularity.** One config switch chooses whether each article is one row, one row per numbered paragraph (`Art. 5(1)`), or one row per lettered point (`Art. 5(1)(a)`) — following the EU Joint Practical Guide.
-- **Four HTML structures + PDF fallback.** Automatic detection across EUR-Lex's four HTML eras (Standard OJ, Manual CSS, class-based, text-only) with Docling/pymupdf for older docs that have no machine-readable HTML.
+- **Six HTML structures + PDF fallback.** Automatic detection across EUR-Lex's HTML eras (Standard OJ, Manual CSS, class-based, text-only, consolidated-norm, classless) with Docling/pymupdf for older docs that have no machine-readable HTML.
 - **Two query modes.** Fixed (give us a list of CELEX IDs / procedure numbers) or descriptive (date range + doc types + optional EuroVoc keyword filter).
 - **Inter-document relations.** Citations, amendments, legal basis, repeals, consolidations — all in one table for network analysis.
 - **Translation built in.** Non-English-only documents are translated to English via Helsinki-NLP Opus-MT, separately at document level (`works.full_text`) and per-unit (`text_units.text_translated`).
@@ -346,14 +346,14 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 | Column | Type | Description |
 |---|---|---|
 | `celex_id` | VARCHAR PK | CELEX identifier (e.g. `32016R0679`) |
-| `title` | VARCHAR | English title from SPARQL |
+| `title` | VARCHAR | English title from SPARQL; falls back to another language when no English title exists |
 | `date_adopted` | DATE | Document adoption date |
 | `document_type` | VARCHAR | Derived from CELEX type code |
-| `language` | VARCHAR | Language of fetched content |
+| `language` | VARCHAR | Language of fetched content; NULL when no content could be fetched |
 | `full_text` | VARCHAR | Full document text (translated to English if non-English source) |
 | `full_text_original` | VARCHAR | Original-language text (non-English docs only) |
 | `full_text_html` | VARCHAR | Raw HTML (only if `store_raw_html: true`) |
-| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …) |
+| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). `cellar_pdf_<lang>_fallback` when the PDF retry beat poor HTML extraction; suffix `__translated` when the translate-before-extract fallback produced the text units |
 | `date_entry_into_force` | DATE | Populated by `enrich` |
 | `date_end_of_validity` | DATE | Populated by `enrich`; `9999-12-31` if still in force |
 | `is_in_force` | BOOLEAN | Populated by `enrich` |
@@ -374,11 +374,11 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 |---|---|---|
 | `id` | INTEGER PK | Auto-increment; preserves document order |
 | `celex_id` | VARCHAR FK | Parent document |
-| `type` | VARCHAR | `recital`, `article`, `annex`, `paragraph` (COMs), `footnote`, `body` (fallback) |
+| `type` | VARCHAR | `recital`, `article`, `annex`, `paragraph` (COMs, proposals, staff working documents), `footnote`, `body` (fallback) |
 | `subtype` | VARCHAR | `"subheading"` (short recitals), `"table"` (COM table paragraphs), `"amendment_item"` (mechanical edits in amending acts), or NULL |
 | `number` | VARCHAR | Unit number (e.g. `"1"`, `"IV"`, `"A"`) |
 | `paragraph_num` | VARCHAR | `"1"`, `"1a"`, `"2"`, … when `article_granularity` ≠ `"article"`; `"0"` for preamble before paragraph 1. NULL otherwise |
-| `point_letter` | VARCHAR | `"a"`, `"b"`, … when `article_granularity = "point"`. NULL otherwise |
+| `point_letter` | VARCHAR | `"a"`, `"b"`, … (or `"aa"` for amendment-inserted points) when `article_granularity = "point"`. NULL otherwise |
 | `title` | VARCHAR | Article or annex title |
 | `text` | VARCHAR | Extracted text |
 | `text_translated` | VARCHAR | English translation (populated by `translate`) |
@@ -413,7 +413,7 @@ Set `parallel: true` and `max_workers: 8` (or higher, up to 16) in the config. T
 
 `paragraph` splits each article on its numbered paragraphs (`1.`, `2.`, `1a.`). Lettered sub-points stay inside the parent paragraph row.
 
-`point` goes one level deeper: when a paragraph contains lettered points like GDPR Art. 6(1)(a)…(f), each gets its own row. Articles without lettered points behave identically under either setting.
+`point` goes one level deeper: when a paragraph contains lettered points like GDPR Art. 6(1)(a)…(f), each gets its own row. Point markers are validated against the drafting sequence — amendment-inserted points like `(aa)` get their own rows, while roman sub-points `(i)`, `(ii)` stay inside their parent point. Articles without lettered points behave identically under either setting.
 
 Use `paragraph` when each numbered paragraph encodes one obligation and that's the analytical unit you want. Use `point` when paragraphs sometimes serve as umbrella stems ("processing shall be lawful only if at least one applies:") with the substantive content entirely in the points.
 
@@ -497,7 +497,7 @@ config.yaml (Pydantic-validated)
   ├─ Per-document processing (parallel or sequential):
   │     metadata fetch         — SPARQL: title, date, relations
   │     content fetch           — REST: XHTML / HTML / PDF (six-language fallback)
-  │     text extraction         — lxml: 4 HTML structures + paragraph splitting + PDF/Docling
+  │     text extraction         — lxml: 6 HTML structures + paragraph splitting + PDF/Docling
   │     translate-before-extract — Opus-MT fallback when a non-English legislative
   │                                PDF produces zero structural units (English-only
   │                                markers like "Whereas:" wouldn't fire on a French

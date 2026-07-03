@@ -314,3 +314,177 @@ def test_emits_article_type_only():
     for granularity in ("article", "paragraph", "point"):
         units = split_article(parts, number="5", title=None, granularity=granularity)
         assert all(u["type"] == "article" for u in units)
+
+
+# ---------------------------------------------------------------------------
+# Quoted-region regressions (2026-07 review): apostrophes inside quoted
+# replacement law must not end the region; unterminated quotes cover the rest.
+# ---------------------------------------------------------------------------
+
+def test_quoted_block_with_apostrophe_is_not_split():
+    """An apostrophe (’) inside the quoted replacement text must not close
+    the quoted region — the inner '1.' / '2.' markers stay unsplit."""
+    parts = [
+        "Article 5 is replaced by the following:",
+        "‘Article 5",
+        "Member States’ obligations",
+        "1. Each Member State shall designate an authority.",
+        "2. The authority shall report annually.’.",
+    ]
+    units = split_article(
+        parts, number="1", title="Amendments to Directive X", granularity="paragraph",
+    )
+    assert len(units) == 1
+    assert units[0]["paragraph_num"] is None
+    assert "report annually" in units[0]["text"]
+    # The quoted law must never be tagged as a mechanical edit.
+    assert units[0]["subtype"] is None
+
+
+def test_unterminated_quote_treats_rest_as_quoted():
+    parts = [
+        "Article 5 is replaced by the following:",
+        "‘Article 5",
+        "1. Each Member State shall designate an authority.",
+        "2. The authority shall report annually.",
+    ]
+    units = split_article(
+        parts, number="1", title="Amendments to Directive X", granularity="paragraph",
+    )
+    assert len(units) == 1
+    assert "report annually" in units[0]["text"]
+
+
+def test_straight_apostrophe_inside_quoted_block_is_not_split():
+    parts = [
+        "1. Article 10 is replaced by the following: 'Article 10 Member States' obligations: 1. The scope shall be broad.'.",
+    ]
+    units = split_article(
+        parts, number="1", title="Amendments to Regulation X", granularity="paragraph",
+    )
+    assert len(units) == 1
+    assert "The scope shall be broad" in units[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Point-sequence regressions (2026-07 review): double-letter insertions,
+# roman sub-points, and wrapped continuations of the last point.
+# ---------------------------------------------------------------------------
+
+def test_point_level_double_letter_insertion():
+    """Amendment-inserted points like (aa) between (a) and (b) get own rows."""
+    parts = [
+        "1. The following categories apply:",
+        "(a) first point;",
+        "(aa) inserted point;",
+        "(b) second point.",
+    ]
+    units = split_article(parts, number="3", title=None, granularity="point")
+    letters = [u["point_letter"] for u in units if u["point_letter"]]
+    assert letters == ["a", "aa", "b"]
+    aa = [u for u in units if u["point_letter"] == "aa"][0]
+    assert aa["text"] == "inserted point;"
+
+
+def test_point_level_roman_subpoints_stay_inside_parent_point():
+    """Roman sub-points (i), (ii) subdivide a point — they must stay inside
+    it, not become points 'i' etc. or dangling fragments."""
+    parts = [
+        "1. The following categories apply:",
+        "(a) first point;",
+        "(b) second point, including:",
+        "(i) first sub-point;",
+        "(ii) second sub-point.",
+    ]
+    units = split_article(parts, number="3", title=None, granularity="point")
+    letters = [u["point_letter"] for u in units if u["point_letter"]]
+    assert letters == ["a", "b"]
+    b_point = [u for u in units if u["point_letter"] == "b"][0]
+    assert "first sub-point" in b_point["text"]
+    assert "second sub-point" in b_point["text"]
+
+
+def test_point_level_letter_i_after_h_is_a_real_point():
+    """(i) following (h) is the expected successor, not a roman sub-point."""
+    parts = ["1. List:"] + [f"({c}) point {c};" for c in "abcdefghi"]
+    units = split_article(parts, number="3", title=None, granularity="point")
+    letters = [u["point_letter"] for u in units if u["point_letter"]]
+    assert letters == list("abcdefghi")
+
+
+def test_point_level_sequence_not_starting_at_a_falls_back():
+    """Markers that don't start at (a) (e.g. quoted fragments) don't split."""
+    parts = [
+        "1. As set out below:",
+        "(c) some text that looks like a point;",
+        "(d) some more text.",
+    ]
+    units = split_article(parts, number="3", title=None, granularity="point")
+    assert all(u["point_letter"] is None for u in units)
+
+
+def test_point_level_wrapped_continuation_of_last_point_absorbed():
+    """A lowercase-starting wrapped line after the last point belongs to that
+    point; only uppercase-starting lines are trailing subparagraphs."""
+    parts = [
+        "1. Processing shall be lawful only if:",
+        "(a) the data subject has given consent;",
+        "(b) processing is necessary for compliance",
+        "with a legal obligation to which the controller is subject.",
+    ]
+    units = split_article(parts, number="6", title=None, granularity="point")
+    assert len(units) == 3  # stem, (a), (b) — no fragment row
+    b_point = [u for u in units if u["point_letter"] == "b"][0]
+    assert b_point["text"].endswith("controller is subject.")
+
+
+# ---------------------------------------------------------------------------
+# Second-round regressions (2026-07 xhigh review of the first fix round).
+# ---------------------------------------------------------------------------
+
+def test_inline_quoted_term_does_not_suppress_later_paragraphs():
+    """An inline quoted term whose close quote is followed by a space must
+    close there — not swallow the rest of the article as 'quoted'."""
+    parts = [
+        "1. The programme shall be known as: ‘Erasmus+’ and shall cover the period.",
+        "2. Member States shall participate.",
+        "3. The Commission shall report.",
+    ]
+    units = split_article(parts, number="1", title=None, granularity="paragraph")
+    assert [u["paragraph_num"] for u in units] == ["1", "2", "3"]
+
+
+def test_point_sequence_tolerates_deleted_points():
+    """Consolidated text with point (c) deleted: (d)/(e) keep their own rows."""
+    parts = ["1. List:", "(a) point a;", "(b) point b;", "(d) point d;", "(e) point e."]
+    units = split_article(parts, number="1", title=None, granularity="point")
+    letters = [u["point_letter"] for u in units if u["point_letter"]]
+    assert letters == ["a", "b", "d", "e"]
+
+
+def test_point_sequence_starts_at_b_when_a_is_inline_in_stem():
+    """(a) smushed into the stem line: points (b) onward still split."""
+    parts = [
+        "1. Lawful only if: (a) consent is given;",
+        "(b) contract;",
+        "(c) legal obligation;",
+        "(d) vital interests.",
+    ]
+    units = split_article(parts, number="1", title=None, granularity="point")
+    letters = [u["point_letter"] for u in units if u["point_letter"]]
+    assert letters == ["b", "c", "d"]
+
+
+def test_point_level_capitalized_wrapped_continuation_absorbed():
+    """A wrapped continuation starting with a capitalized word (no sentence
+    punctuation before the break) stays inside the last point."""
+    parts = [
+        "1. The following apply:",
+        "(a) consent;",
+        "(b) processing is necessary in accordance with",
+        "Regulation (EU) 2016/679 of the European Parliament.",
+    ]
+    units = split_article(parts, number="1", title=None, granularity="point")
+    assert len(units) == 3
+    b_point = [u for u in units if u["point_letter"] == "b"][0]
+    assert "Regulation (EU) 2016/679" in b_point["text"]
