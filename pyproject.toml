@@ -28,6 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 pdf = [
     "docling>=2.70",
+    "onnxruntime>=1.24.2,<2",
     "pymupdf>=1.24",
 ]
 translate = [

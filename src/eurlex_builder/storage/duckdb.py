@@ -460,7 +460,8 @@ class DuckDBStore:
         dependencies = {}
         for package in (
             "eurlex-builder", "duckdb", "polars", "pyarrow", "lxml",
-            "requests", "docling", "pymupdf", "transformers", "torch",
+            "requests", "docling", "onnxruntime", "pymupdf", "transformers",
+            "torch",
         ):
             try:
                 dependencies[package] = version(package)
