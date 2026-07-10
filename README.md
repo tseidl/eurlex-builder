@@ -18,6 +18,7 @@ The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis
 - **Inter-document relations.** Citations, amendments, legal basis, repeals, consolidations — all in one table for network analysis.
 - **Translation built in.** Non-English-only documents are translated to English via Helsinki-NLP Opus-MT, separately at document level (`works.full_text`) and per-unit (`text_units.text_translated`).
 - **Reproducible + resumable.** A single YAML defines the dataset; a checkpoint table in DuckDB makes the pipeline restart-safe and incremental.
+- **Auditable runs.** DuckDB stores every validated config, its SHA-256 hash, runtime versions, and completion status; `validate` checks structural integrity without modifying the database.
 - **Parallel mode.** Multi-threaded fetching with `parallel: true`; sequential writes keep DuckDB contention-free.
 
 ---
@@ -139,7 +140,7 @@ pip install -e ".[dev]"
 
 ## Configuration reference
 
-A single YAML file defines the dataset. Only the `data` section is required; everything else has sensible defaults.
+A single YAML file defines the dataset. Only the `data` section is required; everything else has sensible defaults. Unknown keys and malformed CELEX IDs are rejected rather than silently ignored.
 
 <details>
 <summary><strong>metadata</strong> &nbsp;— stamped onto the output, not used for filtering</summary>
@@ -239,7 +240,7 @@ data:
 |-------|------|---------|-------------|
 | `automated_mode` | bool | `false` | Skip interactive EuroVoc keyword review |
 | `parallel` | bool | `false` | Multi-threaded fetching |
-| `max_workers` | int (1–16) | `4` | Number of parallel threads. 8–12 is reasonable on a good connection |
+| `max_workers` | int (1–16) | `4` | Number of parallel threads. Start with 8; PDF-heavy runs may be limited by CPU and memory rather than the connection |
 | `include_relations` | bool | `true` | Fetch + store inter-document relations |
 | `include_eurovoc` | bool | `false` | Include EuroVoc descriptors in metadata fetch (also via the `enrich` command) |
 | `fetch_original_recitals_for_consolidated` | bool | `true` | Consolidated texts: fetch recitals from the original act |
@@ -293,10 +294,12 @@ Run the pipeline.
 | Argument | Description |
 |---|---|
 | `config` | YAML config file |
-| `--fresh` | Ignore checkpoints; re-process everything |
+| `--fresh` | Clear checkpoints for the selected documents and re-process them |
 | `--retry-failed` | Re-attempt previously failed docs |
 
-The pipeline resumes by default, skipping checkpointed docs.
+The pipeline resumes by default, skipping checkpointed docs. After an
+interrupted `--fresh` rebuild, re-run without `--fresh` to resume the new
+rebuild rather than clearing its completed checkpoints again.
 
 ### `eurlex-builder translate <db>`
 
@@ -321,9 +324,15 @@ Add post-hoc metadata via SPARQL — no re-fetching content. Adds entry-into-for
 | `--max-workers` | Number of parallel workers (default 4) |
 | `--force` | Re-enrich already-enriched docs |
 
+Completion is tracked separately for `metadata`, `relations`, and `eurovoc`, so categories can be run independently and resumed later. A successful response includes category completion sentinels; only then can an empty refresh remove stale values. Databases enriched by older releases are migrated to all-category checkpoints from `enriched_at` instead of unexpectedly re-fetching every work.
+
 ### `eurlex-builder status <db>`
 
 Print checkpoint summary (processed / failed counts + failure reasons).
+
+### `eurlex-builder validate <db>`
+
+Run read-only integrity checks for checkpoint/work consistency, orphaned rows, stable unit identity, duplicate keys/order, and translated-fallback markers. The command exits non-zero when an error is found and reports expected data gaps as warnings.
 
 ---
 
@@ -331,7 +340,7 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 
 | File | Description |
 |---|---|
-| `eurlex_builder.duckdb` | Working database with all tables + checkpoint state |
+| `eurlex_builder.duckdb` | Working database with data tables, checkpoints, and run manifests |
 | `works.parquet` | One row per document |
 | `text_units.parquet` | One row per recital / article (or paragraph / point at sub-article granularity) / annex |
 | `relations.parquet` | One row per inter-document relation |
@@ -363,7 +372,7 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 | `procedure_type` | VARCHAR | e.g. `OLP` for ordinary legislative |
 | `procedure_reference` | VARCHAR | e.g. `2012/0011/COD` |
 | `procedure_legal_basis` | VARCHAR | Treaty legal basis |
-| `enriched_at` | TIMESTAMP | NULL if not yet enriched |
+| `enriched_at` | TIMESTAMP | Most recent enrichment timestamp; category completion is tracked internally in `_enrichment_checkpoint` |
 
 </details>
 
@@ -372,12 +381,15 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 
 | Column | Type | Description |
 |---|---|---|
-| `id` | INTEGER PK | Auto-increment; preserves document order |
+| `id` | INTEGER PK | Internal surrogate key; may change after re-extraction |
 | `celex_id` | VARCHAR FK | Parent document |
+| `unit_order` | INTEGER | Stable one-based order within a document |
+| `unit_key` | VARCHAR | Deterministic key built from CELEX and structural coordinates; duplicate coordinates receive an occurrence suffix |
 | `type` | VARCHAR | `recital`, `article`, `annex`, `paragraph` (COMs, proposals, staff working documents), `footnote`, `body` (fallback) |
 | `subtype` | VARCHAR | `"subheading"` (short recitals), `"table"` (COM table paragraphs), `"amendment_item"` (mechanical edits in amending acts), or NULL |
 | `number` | VARCHAR | Unit number (e.g. `"1"`, `"IV"`, `"A"`) |
 | `paragraph_num` | VARCHAR | `"1"`, `"1a"`, `"2"`, … when `article_granularity` ≠ `"article"`; `"0"` for preamble before paragraph 1. NULL otherwise |
+| `subparagraph_num` | VARCHAR | One-based subparagraph coordinate when point granularity emits structurally separate unnumbered subparagraphs |
 | `point_letter` | VARCHAR | `"a"`, `"b"`, … (or `"aa"` for amendment-inserted points) when `article_granularity = "point"`. NULL otherwise |
 | `title` | VARCHAR | Article or annex title |
 | `text` | VARCHAR | Extracted text |
@@ -397,6 +409,13 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 
 </details>
 
+<details>
+<summary><strong>dataset_runs</strong> &nbsp;— reproducibility manifest stored in DuckDB</summary>
+
+Each pipeline invocation records its validated configuration JSON and SHA-256 hash, package and Python versions, installed extraction/translation dependency versions, Git revision and dirty-worktree flag when run from a checkout, timestamps, and final status. Run manifests remain in DuckDB and are not duplicated into the four analytical Parquet tables.
+
+</details>
+
 ---
 
 ## FAQ
@@ -404,7 +423,17 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 <details>
 <summary><strong>How do I speed up large runs?</strong></summary>
 
-Set `parallel: true` and `max_workers: 8` (or higher, up to 16) in the config. The bottleneck is HTTP fetching from EUR-Lex, so more workers help linearly. The pipeline writes to DuckDB sequentially regardless of worker count, so there's no thread contention.
+Set `parallel: true` and start with `max_workers: 8`. Modern HTML-heavy
+runs are mainly limited by Cellar requests, while older corpora spend much of
+their time in Docling PDF conversion. More workers help only until CPU, memory,
+or the shared Cellar request limit is saturated; 16 workers can be slower on a
+memory-constrained machine. DuckDB writes remain sequential, so workers do not
+contend for the database.
+
+For a clean rebuild, use a new output directory and let checkpoints make it
+restart-safe. Do not pass `--fresh` again after an interruption. Source PDFs
+and Docling intermediates are not cached, so changing only the output directory
+does not reuse extraction from an older dataset.
 
 </details>
 
@@ -414,6 +443,8 @@ Set `parallel: true` and `max_workers: 8` (or higher, up to 16) in the config. T
 `paragraph` splits each article on its numbered paragraphs (`1.`, `2.`, `1a.`). Lettered sub-points stay inside the parent paragraph row.
 
 `point` goes one level deeper: when a paragraph contains lettered points like GDPR Art. 6(1)(a)…(f), each gets its own row. Point markers are validated against the drafting sequence — amendment-inserted points like `(aa)` get their own rows, while roman sub-points `(i)`, `(ii)` stay inside their parent point. Articles without lettered points behave identically under either setting.
+
+HTML element boundaries may also expose formally separate unnumbered subparagraphs at point granularity; these receive `subparagraph_num`. PDF line wrapping alone never creates subparagraph rows.
 
 Use `paragraph` when each numbered paragraph encodes one obligation and that's the analytical unit you want. Use `point` when paragraphs sometimes serve as umbrella stems ("processing shall be lawful only if at least one applies:") with the substantive content entirely in the points.
 
@@ -437,9 +468,27 @@ Update `end_date` in the YAML and re-run **without** `--fresh`. The checkpoint t
 </details>
 
 <details>
+<summary><strong>How do I make a clean dataset after extraction changes?</strong></summary>
+
+Use a new `output_directory` for the strongest reproducibility boundary, then
+run the current config normally. An empty database is already a fresh run, so
+`--fresh` is only needed when deliberately rebuilding the selected documents in
+an existing database. If that rebuild is interrupted, resume without `--fresh`.
+Commit the extraction changes before starting so the run manifest records a
+clean, exact Git revision.
+
+Raw HTML is retained only when `store_raw_html: true`; downloaded PDFs and
+Docling's intermediate output are not cached. A clean rebuild therefore
+redownloads source documents and re-runs PDF extraction. This is slower, but it
+ensures every exported row was produced by the same package version and config.
+Run `eurlex-builder validate <db>` after the build and enrichment steps.
+
+</details>
+
+<details>
 <summary><strong>What happens to documents the pipeline can't fetch?</strong></summary>
 
-They stay in `works` as rows with empty text columns and an entry in `missing_content.tsv`. This keeps the dataset transparent — a missing row is worse than a row with NAs, because it silently drops data.
+They stay in `works` as rows with empty text columns and an entry in `missing_content.tsv`. This keeps the dataset transparent — a missing row is worse than a row with NAs, because it silently drops data. Transient request and SPARQL failures are checkpointed as failed instead, so `--retry-failed` can recover them. If content that was fetched previously later becomes unavailable, the stored content is preserved.
 
 </details>
 
@@ -460,7 +509,7 @@ See **Citation** below. If your paper uses the dataset rather than the pipeline 
 <details>
 <summary><strong>Can I add a custom data source / extractor?</strong></summary>
 
-Yes. The pipeline talks to its dependencies via three protocols defined in `src/eurlex_builder/protocols.py`: `DataSource`, `TextExtractor`, `Store`. Implement those and pass instances to `Pipeline(...)`. The default wiring is `CellarSource` + `HtmlExtractor` + `PdfExtractor` + `DuckDBStore`.
+The sequential extraction core accepts custom `DataSource`, `TextExtractor`, `Store`, and `Checkpoint` implementations through the protocols in `src/eurlex_builder/protocols.py`. The default wiring is `CellarSource` + `HtmlExtractor` + `PdfExtractor` + `DuckDBStore`. Parallel source creation, built-in translation, run manifests, and detailed statistics currently assume the default components; custom implementations should use sequential mode or provide equivalent methods.
 
 </details>
 
@@ -481,7 +530,7 @@ Docling's PDF layout parser can segment paragraphs differently across versions. 
 <details>
 <summary><strong>What is the translate-before-extract fallback?</strong></summary>
 
-The legislative PDF extractor uses English-only markers (`Whereas:`, `HAS ADOPTED THIS REGULATION:`, `ANNEX`). For non-English PDFs where these markers don't fire, the pipeline translates the Docling markdown to English via Opus-MT and re-parses from there. This fires automatically when a non-English legislative PDF produces fewer than 3 recitals. Affected rows are marked with `content_source` ending in `__translated` and have `text_translated` pre-filled. The alternative — adding native markers for every EU language — was rejected as a maintenance burden.
+The legislative PDF extractor uses English-only markers (`Whereas:`, `HAS ADOPTED THIS REGULATION:`, `ANNEX`). For non-English PDFs where these markers don't fire, the pipeline translates the Docling markdown to English via Opus-MT and re-parses from there. This fires when a requested structure is conspicuously missing, including fewer than three requested recitals or no requested articles. The translated parse is adopted only when at least one requested structure count improves and none regress. Affected rows are marked with `content_source` ending in `__translated` and have `text_translated` pre-filled. The alternative — adding native markers for every EU language — was rejected as a maintenance burden.
 
 </details>
 
@@ -499,7 +548,7 @@ config.yaml (Pydantic-validated)
   │     content fetch           — REST: XHTML / HTML / PDF (six-language fallback)
   │     text extraction         — lxml: 6 HTML structures + paragraph splitting + PDF/Docling
   │     translate-before-extract — Opus-MT fallback when a non-English legislative
-  │                                PDF produces zero structural units (English-only
+  │                                PDF misses requested structures (English-only
   │                                markers like "Whereas:" wouldn't fire on a French
   │                                or German PDF). Translates the Docling markdown
   │                                and re-parses from English.

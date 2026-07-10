@@ -6,6 +6,12 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 
+from eurlex_builder.constants import (
+    ENRICHMENT_CATEGORIES,
+    ENRICHMENT_RELATION_TYPES,
+    ensure_enrichment_checkpoint,
+)
+from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.utils import RateLimiter
 
 logger = logging.getLogger("eurlex_builder")
@@ -19,9 +25,6 @@ _MULTI_VALUED = {"author", "subject_matter"}
 
 # Fields that should have their URI tail extracted as a readable label.
 _URI_TAIL_FIELDS = {"author", "subject_matter", "procedure_type"}
-
-# Relation types extracted during enrichment.
-ENRICH_RELATION_TYPES = {"repeals", "implicitly_repeals"}
 
 # Scalar metadata fields and their SQL types (for migration).
 ENRICH_COLUMNS: dict[str, str] = {
@@ -56,7 +59,9 @@ def _extract_uri_tail(uri: str) -> str:
     return uri.rsplit("/", 1)[-1] if "/" in uri else uri
 
 
-def _build_enrich_query(celex_id: str, categories: set[str]) -> str:
+def _build_enrich_query(
+    celex_id: str, categories: set[str] | frozenset[str],
+) -> str:
     """Build SPARQL query for enrichment fields."""
     encoded = quote(celex_id, safe="")
     blocks: list[str] = []
@@ -114,6 +119,13 @@ def _build_enrich_query(celex_id: str, categories: set[str]) -> str:
               BIND(CONCAT(STR(?ev), "|", COALESCE(?evlabel, "")) AS ?value) }"""
         )
 
+    for category in sorted(categories):
+        blocks.append(
+            "{ "
+            f'BIND("zz_complete_{category}" AS ?data_type) '
+            'BIND("1" AS ?value) }'
+        )
+
     if not blocks:
         return ""
 
@@ -127,39 +139,45 @@ WHERE {{
     ?work owl:sameAs <http://publications.europa.eu/resource/celex/{encoded}> .
     {union}
 }}
+ORDER BY ?data_type ?value
 """
 
 
-def _enrich_one(celex_id: str, query: str) -> dict:
-    """Run enrichment SPARQL for one document, return parsed results.
-
-    `ok` is False when the query itself failed — the caller must then skip
-    the save entirely (an empty result from a FAILED query must not be
-    mistaken for "this document has no descriptors").
-    """
+def _enrich_one(
+    celex_id: str,
+    query: str,
+    categories: set[str] | frozenset[str],
+) -> dict:
+    """Run enrichment SPARQL and require category completion sentinels."""
     from eurlex_builder.sources.cellar import _sparql_query, _parse_value
 
-    result = _sparql_query(query, label=f"Enrich {celex_id}")
+    result = _sparql_query(
+        query, label=f"Enrich {celex_id}", raise_on_failure=True,
+    )
     if result is None:
-        return {"celex_id": celex_id, "metadata": {}, "relations": [], "eurovoc": [], "ok": False}
+        raise TransientSourceError(f"Enrichment query failed for {celex_id}")
 
     bindings = result.get("results", {}).get("bindings", [])
 
     metadata: dict[str, list] = {}
     relations: list[dict] = []
     eurovoc: list[dict] = []
+    completed_categories: set[str] = set()
 
     for binding in bindings:
-        data_type = _parse_value(binding.get("data_type", {}))
+        data_type = str(_parse_value(binding.get("data_type", {})))
         value = _parse_value(binding.get("value", {}))
 
-        if data_type in _METADATA_FIELDS:
+        if data_type.startswith("zz_complete_"):
+            completed_categories.add(data_type.removeprefix("zz_complete_"))
+
+        elif data_type in _METADATA_FIELDS:
             # Convert URI-based fields to readable labels.
             if data_type in _URI_TAIL_FIELDS and isinstance(value, str):
                 value = _extract_uri_tail(value)
             metadata.setdefault(data_type, []).append(value)
 
-        elif data_type in ENRICH_RELATION_TYPES:
+        elif data_type in ENRICHMENT_RELATION_TYPES:
             relations.append({
                 "source_celex": celex_id,
                 "target_celex": value,
@@ -190,28 +208,60 @@ def _enrich_one(celex_id: str, query: str) -> dict:
         else:
             collapsed[field] = values[0]
 
+    missing_categories = set(categories) - completed_categories
+    if missing_categories:
+        raise TransientSourceError(
+            f"Incomplete enrichment response for {celex_id}; missing completion "
+            f"sentinel(s): {', '.join(sorted(missing_categories))}"
+        )
+
     return {
         "celex_id": celex_id,
         "metadata": collapsed,
         "relations": relations,
         "eurovoc": eurovoc,
-        "ok": True,
     }
 
 
 def enrich_database(
     db_path: str,
     *,
-    categories: set[str] = frozenset({"metadata", "relations", "eurovoc"}),
+    categories: set[str] | frozenset[str] = ENRICHMENT_CATEGORIES,
     parallel: bool = False,
     max_workers: int = 4,
     force: bool = False,
 ) -> None:
     """Enrich all documents in a DuckDB database with additional SPARQL metadata."""
     import duckdb
+    conn = duckdb.connect(db_path)
+    try:
+        _enrich_database_inner(
+            conn,
+            categories=categories,
+            parallel=parallel,
+            max_workers=max_workers,
+            force=force,
+        )
+    finally:
+        conn.close()
+
+
+def _enrich_database_inner(
+    conn,
+    *,
+    categories: set[str] | frozenset[str],
+    parallel: bool,
+    max_workers: int,
+    force: bool,
+) -> None:
+    """Run enrichment with connection lifetime managed by the caller."""
     from tqdm import tqdm
 
-    conn = duckdb.connect(db_path)
+    unknown_categories = set(categories) - ENRICHMENT_CATEGORIES
+    if unknown_categories:
+        raise ValueError(
+            f"Unknown enrichment categories: {', '.join(sorted(unknown_categories))}"
+        )
 
     # Ensure enrichment columns exist.
     works_cols = {
@@ -225,22 +275,30 @@ def enrich_database(
         if col not in works_cols:
             conn.execute(f"ALTER TABLE works ADD COLUMN {col} {sql_type}")
 
+    backfilled = ensure_enrichment_checkpoint(conn)
+    if backfilled:
+        logger.info(
+            "Migrated legacy enrichment checkpoints for %d work(s)", backfilled
+        )
     # Find documents to enrich.
     if force:
         celex_ids = [
             row[0] for row in conn.execute("SELECT celex_id FROM works").fetchall()
         ]
     else:
+        completed: dict[str, set[str]] = {}
+        for celex_id, category in conn.execute(
+            "SELECT celex_id, category FROM _enrichment_checkpoint"
+        ).fetchall():
+            completed.setdefault(celex_id, set()).add(category)
         celex_ids = [
             row[0]
-            for row in conn.execute(
-                "SELECT celex_id FROM works WHERE enriched_at IS NULL"
-            ).fetchall()
+            for row in conn.execute("SELECT celex_id FROM works").fetchall()
+            if not categories.issubset(completed.get(row[0], set()))
         ]
 
     if not celex_ids:
         logger.info("All documents already enriched. Use --force to re-enrich.")
-        conn.close()
         return
 
     logger.info("Enriching %d document(s) with categories: %s", len(celex_ids), ", ".join(sorted(categories)))
@@ -249,7 +307,6 @@ def enrich_database(
     test_query = _build_enrich_query("test", categories)
     if not test_query:
         logger.warning("No enrichment categories selected.")
-        conn.close()
         return
 
     enriched_count = 0
@@ -259,7 +316,7 @@ def enrich_database(
     def process_one(celex_id: str) -> dict:
         _sparql_limiter.wait()
         query = _build_enrich_query(celex_id, categories)
-        return _enrich_one(celex_id, query)
+        return _enrich_one(celex_id, query, categories)
 
     if parallel and max_workers > 1:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -270,10 +327,6 @@ def enrich_database(
                     result = future.result()
                 except Exception as exc:
                     logger.warning("Enrichment failed for %s: %s", celex_id, exc)
-                    continue
-                if not result["ok"]:
-                    # Not marked enriched — picked up again on the next run.
-                    logger.warning("Enrichment query failed for %s — skipping save.", celex_id)
                     continue
                 counts = _save_enrichment(conn, result, categories)
                 enriched_count += 1
@@ -286,10 +339,6 @@ def enrich_database(
             except Exception as exc:
                 logger.warning("Enrichment failed for %s: %s", celex_id, exc)
                 continue
-            if not result["ok"]:
-                # Not marked enriched — picked up again on the next run.
-                logger.warning("Enrichment query failed for %s — skipping save.", celex_id)
-                continue
             counts = _save_enrichment(conn, result, categories)
             enriched_count += 1
             rel_count += counts[0]
@@ -299,10 +348,11 @@ def enrich_database(
         "Enriched %d of %d document(s). Added %d relations, %d EuroVoc tags.",
         enriched_count, len(celex_ids), rel_count, ev_count,
     )
-    conn.close()
 
 
-def _save_enrichment(conn, result: dict, categories: set[str]) -> tuple[int, int]:
+def _save_enrichment(
+    conn, result: dict, categories: set[str] | frozenset[str],
+) -> tuple[int, int]:
     """Write enrichment results to DB. Returns (relations_added, eurovoc_added).
 
     Runs as one transaction so `enriched_at` is committed atomically with the
@@ -319,43 +369,37 @@ def _save_enrichment(conn, result: dict, categories: set[str]) -> tuple[int, int
 
     conn.execute("BEGIN TRANSACTION")
     try:
-        # Update scalar metadata columns.
-        if metadata and "metadata" in categories:
-            set_clauses = []
-            values = []
-            for field in _METADATA_FIELDS:
-                if field in metadata:
-                    set_clauses.append(f"{field} = ?")
-                    values.append(metadata[field])
-            set_clauses.append("enriched_at = current_timestamp")
-            sql = f"UPDATE works SET {', '.join(set_clauses)} WHERE celex_id = ?"
-            values.append(celex_id)
-            conn.execute(sql, values)
-        else:
-            # No metadata found (or not requested), but still mark as enriched.
+        # A successful metadata query is authoritative, including absent values.
+        if "metadata" in categories:
+            fields = sorted(_METADATA_FIELDS)
+            set_clauses = [f"{field} = ?" for field in fields]
+            values = [metadata.get(field) for field in fields]
             conn.execute(
-                "UPDATE works SET enriched_at = current_timestamp WHERE celex_id = ?",
-                [celex_id],
+                f"UPDATE works SET {', '.join(set_clauses)} WHERE celex_id = ?",
+                values + [celex_id],
             )
 
-        # Insert new relation types (don't duplicate existing ones).
-        if relations and "relations" in categories:
-            for rel in relations:
-                existing = conn.execute(
-                    "SELECT 1 FROM relations WHERE source_celex = ? AND target_celex = ? AND relation_type = ?",
-                    [rel["source_celex"], rel["target_celex"], rel["relation_type"]],
-                ).fetchone()
-                if not existing:
-                    conn.execute(
-                        "INSERT INTO relations (id, source_celex, target_celex, relation_type) "
-                        "VALUES (nextval('relations_id_seq'), ?, ?, ?)",
-                        [rel["source_celex"], rel["target_celex"], rel["relation_type"]],
-                    )
-                    rel_added += 1
+        # Replace enrichment-owned relation types so force refresh removes stale rows.
+        if "relations" in categories:
+            placeholders = ", ".join("?" for _ in ENRICHMENT_RELATION_TYPES)
+            conn.execute(
+                f"DELETE FROM relations WHERE source_celex = ? "
+                f"AND relation_type IN ({placeholders})",
+                [celex_id, *sorted(ENRICHMENT_RELATION_TYPES)],
+            )
+            unique_relations = {
+                (rel["source_celex"], rel["target_celex"], rel["relation_type"])
+                for rel in relations
+            }
+            if unique_relations:
+                conn.executemany(
+                    "INSERT INTO relations (id, source_celex, target_celex, relation_type) "
+                    "VALUES (nextval('relations_id_seq'), ?, ?, ?)",
+                    [list(rel) for rel in sorted(unique_relations)],
+                )
+                rel_added = len(unique_relations)
 
-        # Replace EuroVoc descriptors. The query succeeded (callers gate on
-        # result["ok"]), so an empty list means the document genuinely has
-        # none — stale rows must go too.
+        # Completion sentinels make a successful empty list authoritative.
         if "eurovoc" in categories:
             conn.execute("DELETE FROM eurovoc WHERE celex_id = ?", [celex_id])
             if eurovoc:
@@ -364,6 +408,18 @@ def _save_enrichment(conn, result: dict, categories: set[str]) -> tuple[int, int
                     [[celex_id, d["eurovoc_uri"], d["eurovoc_label"]] for d in eurovoc],
                 )
                 ev_added = len(eurovoc)
+
+        conn.execute(
+            "UPDATE works SET enriched_at = current_timestamp WHERE celex_id = ?",
+            [celex_id],
+        )
+        for category in sorted(categories):
+            conn.execute(
+                """INSERT OR REPLACE INTO _enrichment_checkpoint
+                   (celex_id, category, timestamp)
+                   VALUES (?, ?, current_timestamp)""",
+                [celex_id, category],
+            )
         conn.execute("COMMIT")
     except Exception:
         try:

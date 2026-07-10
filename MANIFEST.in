@@ -1,0 +1,2 @@
+recursive-include configs *.yaml
+recursive-include tests *.py

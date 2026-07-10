@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger("eurlex_builder")
@@ -10,7 +11,7 @@ logger = logging.getLogger("eurlex_builder")
 TABLES = ["works", "text_units", "relations", "eurovoc"]
 
 
-def export_tables(conn, output_dir: str, formats: list[str]) -> None:
+def export_tables(conn, output_dir: str, formats: Sequence[str]) -> None:
     """Export all data tables to the requested formats."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)

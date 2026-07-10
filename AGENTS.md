@@ -14,11 +14,12 @@ Configurable Python pipeline that builds structured datasets from EU legislative
   - `extractors/splitter.py` — sub-article splitting (paragraph/point granularity)
   - `storage/duckdb.py` — DuckDB store + checkpoint implementation
   - `storage/export.py` — Polars-based Parquet/CSV export
+  - `validate.py` — read-only dataset integrity checks
   - `translate.py` — Helsinki-NLP Opus-MT translation
   - `enrich.py` — post-hoc SPARQL metadata enrichment
   - `eurovoc_review.py` — interactive EuroVoc concept review
   - `utils.py` — CELEX validation, string normalization, boilerplate removal
-  - `cli.py` — argparse CLI (run, translate, enrich, status)
+  - `cli.py` — argparse CLI (run, translate, enrich, status, validate)
 - `tests/` — pytest suite
 - `configs/` — example run configurations
 
@@ -41,16 +42,20 @@ eurlex-builder run config.yaml [--fresh] [--retry-failed]
 eurlex-builder translate <db> [--no-full-text] [--no-text-units]
 eurlex-builder enrich <db> [--select metadata relations eurovoc] [--parallel]
 eurlex-builder status <db>
+eurlex-builder validate <db>
 ```
 
 ## Key design decisions
 
 - Six HTML extraction eras detected at runtime (standard OJ, manual CSS, class-based, text-only, consolidated-norm, classless fallback)
 - PDF fallback via Docling with pymupdf as last resort; 50MB size guard
-- Translate-before-extract fallback for non-English legislative PDFs where English-only markers fail; only adopted when it yields more structural units than the source-language parse
+- Translate-before-extract fallback for non-English legislative PDFs where requested structures are missing; adopted only when requested structure counts improve without regressions
 - Sub-article splitter operates on `body_parts: list[str]` from extractors, not raw HTML
 - Point markers are validated against the drafting sequence ((a), (aa), (b), …); roman sub-points stay inside their parent point
 - "Done at …" ends the enacting terms, but extractors resume collection at ANNEX headings — annexes follow the signature in the OJ layout
 - Quoted replacement law in amending acts (`: '…'`) is never split; close quotes only count when followed by punctuation, so apostrophes don't close a region
 - Checkpoint in DuckDB `_checkpoint` table makes the pipeline restart-safe
+- `--fresh` clears checkpoints only for the selected documents; resume an interrupted fresh rebuild without passing `--fresh` again
 - Relations cached from metadata SPARQL to avoid duplicate queries
+- Stable text-unit keys combine CELEX and structural coordinates; `unit_order` preserves document order
+- Run manifests store the validated config hash and dependency versions in DuckDB

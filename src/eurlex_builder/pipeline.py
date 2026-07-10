@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from tqdm import tqdm
 
 from eurlex_builder.config import Config, DescriptiveMode, FixedMode, load_config
+from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.protocols import Checkpoint, DataSource, Store, TextExtractor
 from eurlex_builder.utils import (
     is_consolidated_celex, convert_consolidated_to_original,
@@ -19,14 +21,53 @@ from eurlex_builder.utils import (
 logger = logging.getLogger("eurlex_builder")
 
 
-def _count_structural_units(units: list[dict]) -> int:
-    """Count recital/article/annex units — the fallback quality signal."""
-    return sum(1 for u in units if u.get("type") in ("recital", "article", "annex"))
+def _structure_profile(units: list[dict]) -> tuple[int, int, int]:
+    """Return recital count and distinct article/annex identifiers."""
+    recitals = sum(1 for unit in units if unit.get("type") == "recital")
+    articles = {
+        unit.get("number") or "__unnumbered__"
+        for unit in units
+        if unit.get("type") == "article"
+    }
+    annexes = {
+        unit.get("number") or "__unnumbered__"
+        for unit in units
+        if unit.get("type") == "annex"
+    }
+    return recitals, len(articles), len(annexes)
+
+
+def _translated_parse_is_better(
+    source_units: list[dict],
+    translated_units: list[dict],
+    *,
+    include_recitals: bool = True,
+    include_articles: bool = True,
+    include_annexes: bool = True,
+) -> bool:
+    """Require improvement in requested structures without a regression."""
+    source_recitals, source_articles, source_annexes = _structure_profile(source_units)
+    translated_recitals, translated_articles, translated_annexes = _structure_profile(
+        translated_units
+    )
+    comparisons = []
+    if include_recitals:
+        comparisons.append((translated_recitals, source_recitals))
+    if include_articles:
+        comparisons.append((translated_articles, source_articles))
+    if include_annexes:
+        comparisons.append((translated_annexes, source_annexes))
+    return bool(comparisons) and all(new >= old for new, old in comparisons) and any(
+        new > old for new, old in comparisons
+    )
 
 
 def _should_run_translate_fallback(
     units: list[dict], doc_type: str | None, language: str,
-    *, include_recitals: bool = True,
+    *,
+    include_recitals: bool = True,
+    include_articles: bool = True,
+    include_annexes: bool = True,
 ) -> bool:
     """Decide whether to translate the source markdown to English and re-extract.
 
@@ -34,26 +75,23 @@ def _should_run_translate_fallback(
       - the source language is not English (no translation needed otherwise),
       - the document is legislative (R/L/D) — recitals are mandatory drafting
         elements for these doc types,
-      - recitals are being extracted at all (with include_recitals=False the
-        recital count is always zero and says nothing about quality),
-      - AND fewer than 3 recitals were extracted in the source language.
+      - AND at least one requested structure is conspicuously absent.
 
-    Three recitals is the design threshold. Legislative acts almost always
-    have at least three preambular recitals; getting fewer than that from a
-    non-English PDF is a strong signal that the English-only "Whereas:" marker
-    failed to fire. The article count is not part of the gate: "Article"
-    happens to match in French/Italian (same spelling) but not in German,
-    Dutch, Spanish — so high article count alone doesn't prove the extractor
-    worked correctly for recitals.
+    Three recitals is the design threshold. Missing requested articles also
+    triggers the fallback because the English marker does not match several
+    supported source languages. Annex-only extraction retries only when no
+    annex structure was recovered.
     """
     if language == "eng":
         return False
-    if not include_recitals:
-        return False
     if doc_type not in ("regulation", "directive", "decision"):
         return False
-    n_recitals = sum(1 for u in units if u.get("type") == "recital")
-    return n_recitals < 3
+    recitals, articles, annexes = _structure_profile(units)
+    if include_recitals and recitals < 3:
+        return True
+    if include_articles and articles == 0:
+        return True
+    return include_annexes and not include_recitals and not include_articles and annexes == 0
 
 
 def _safe_translate_markdown(markdown: str, language: str, celex_id: str) -> str | None:
@@ -89,6 +127,7 @@ class Pipeline:
         self.extractors = extractors
         self.store = store
         self.checkpoint = checkpoint
+        self._selected_ids: set[str] = set()
 
     @classmethod
     def from_config_file(cls, path: str | Path) -> Pipeline:
@@ -118,24 +157,46 @@ class Pipeline:
     def run(self, *, resume: bool = False, retry_failed: bool = False) -> None:
         """Run the pipeline."""
         self._setup_logging()
+        run_id: str | None = None
+        try:
+            run_id = self.store.start_run(self.config.model_dump(mode="json"))
+            self._run_impl(
+                run_id=run_id, resume=resume, retry_failed=retry_failed,
+            )
+        except BaseException:
+            if run_id is not None:
+                try:
+                    self.store.finish_run(run_id, "failed")
+                except Exception:
+                    logger.exception("Could not mark run %s as failed", run_id)
+            raise
+        finally:
+            if hasattr(self.store, "close"):
+                self.store.close()
 
+    def _run_impl(
+        self, *, run_id: str, resume: bool, retry_failed: bool,
+    ) -> None:
         logger.info(f"eurlex-builder v0.1.0 — {self.config.metadata.project_name}")
 
-        # Reset failed entries so they can be retried.
         if retry_failed:
             reset_count = self.checkpoint.reset_failed()
             if reset_count:
                 logger.info(f"Reset {reset_count} failed document(s) for retry.")
-            resume = True  # retry-failed implies resume
+            resume = True
 
-        # Resolve CELEX IDs
         celex_ids = self._resolve_ids()
+        self._selected_ids = set(celex_ids)
         logger.info(f"Found {len(celex_ids)} documents to process.")
 
-        # Filter already-processed if resuming
-        if resume:
+        if not resume:
+            reset_count = self.checkpoint.reset_ids(celex_ids)
+            logger.info(
+                "Fresh rebuild cleared %d selected checkpoint(s).", reset_count
+            )
+        else:
             already_done = self.store.get_processed_ids()
-            celex_ids = [c for c in celex_ids if c not in already_done]
+            celex_ids = [celex_id for celex_id in celex_ids if celex_id not in already_done]
             logger.info(f"Resuming — {len(celex_ids)} remaining after skipping processed.")
 
         if not celex_ids:
@@ -145,7 +206,6 @@ class Pipeline:
         else:
             self._run_sequential(celex_ids)
 
-        # Translate non-English content (sequential, avoids thread contention).
         try:
             from eurlex_builder.translate import translate_database
             tr = self.config.processing.translation
@@ -159,15 +219,16 @@ class Pipeline:
         except ImportError:
             logger.debug("Translation not available (install eurlex-builder[translate])")
 
-        # Export
+        summary = self.checkpoint.get_summary()
+        run_status = "complete_with_failures" if summary.get("failed", 0) else "complete"
+        self.store.finish_run(run_id, run_status)
+
         logger.info("Exporting results...")
         self.store.export(
             self.config.output.output_directory,
             self.config.output.formats,
         )
 
-        # Summary
-        summary = self.checkpoint.get_summary()
         logger.info(
             f"Done. Processed: {summary.get('processed', 0)}, "
             f"Failed: {summary.get('failed', 0)}"
@@ -176,15 +237,11 @@ class Pipeline:
         failed_details = summary.get("failed_details", {})
         if failed_details:
             logger.warning("Failed documents:")
-            for cid, err in failed_details.items():
-                logger.warning(f"  {cid}: {err}")
+            for celex_id, error in failed_details.items():
+                logger.warning(f"  {celex_id}: {error}")
 
-        # Missing content report
         self._report_missing_content()
         self._report_extraction_stats()
-
-        if hasattr(self.store, "close"):
-            self.store.close()
 
     # ------------------------------------------------------------------
     # Sequential mode
@@ -243,13 +300,7 @@ class Pipeline:
                         # yields nothing clears the previous rows — but only
                         # when content was actually fetched: a transient fetch
                         # failure must not wipe previously extracted units.
-                        self.store.save_work(result["metadata"])
-                        if result["fetched"]:
-                            self.store.save_text_units(celex_id, result["units"])
-                        if result["relations"]:
-                            self.store.save_relations(result["relations"], celex_id=celex_id)
-                        if result.get("eurovoc"):
-                            self.store.save_eurovoc(celex_id, result["eurovoc"])
+                        self._persist_result(celex_id, result)
                         self.checkpoint.mark_processed(celex_id)
                     except Exception as e:
                         logger.error(f"Failed to process {celex_id}: {e}")
@@ -342,12 +393,19 @@ class Pipeline:
         extracted units.
         """
         result = self._fetch_and_extract(celex_id, self.source)
-        self.store.save_work(result["metadata"])
+        self._persist_result(celex_id, result)
+
+    def _persist_result(self, celex_id: str, result: dict) -> None:
+        """Persist one successfully fetched result in dependency order."""
+        self.store.save_work(
+            result["metadata"],
+            preserve_existing_content=not result["fetched"],
+        )
         if result["fetched"]:
             self.store.save_text_units(celex_id, result["units"])
-        if result["relations"]:
+        if self.config.processing.include_relations:
             self.store.save_relations(result["relations"], celex_id=celex_id)
-        if result.get("eurovoc"):
+        if self.config.processing.include_eurovoc:
             self.store.save_eurovoc(celex_id, result["eurovoc"])
 
     def _fetch_and_extract(self, celex_id: str, source) -> dict:
@@ -388,8 +446,27 @@ class Pipeline:
 
             # PDF fallback when HTML extraction is poor.
             content_type = fetch_result[1] if fetch_result else ""
-            if content_type == "html" and self._should_retry_with_pdf(units, celex_id):
-                pdf_result = source.fetch_pdf(celex_id)
+            if content_type == "html" and self._should_retry_with_pdf(
+                units,
+                include_recitals=(
+                    text_cfg.include_recitals
+                    and not (
+                        is_consolidated_celex(celex_id)
+                        and proc.fetch_original_recitals_for_consolidated
+                    )
+                ),
+                include_articles=text_cfg.include_articles,
+                include_annexes=text_cfg.include_annexes,
+            ):
+                try:
+                    pdf_result = source.fetch_pdf(celex_id)
+                except TransientSourceError as exc:
+                    logger.warning(
+                        "Optional PDF quality retry failed for %s: %s; "
+                        "keeping HTML extraction",
+                        celex_id, exc,
+                    )
+                    pdf_result = None
                 if pdf_result is not None:
                     pdf_raw, _, pdf_lang = pdf_result
                     pdf_meta: dict = {}
@@ -420,6 +497,8 @@ class Pipeline:
                 _should_run_translate_fallback(
                     units, doc_type, language,
                     include_recitals=text_cfg.include_recitals,
+                    include_articles=text_cfg.include_articles,
+                    include_annexes=text_cfg.include_annexes,
                 )
                 and extract_meta.get("markdown")
             ):
@@ -445,13 +524,21 @@ class Pipeline:
                     # Only adopt the translated parse when it actually found
                     # more structure — a garbled translation must not replace
                     # a partially successful source-language extraction.
-                    if _count_structural_units(translated_units) > _count_structural_units(units):
+                    if _translated_parse_is_better(
+                        units,
+                        translated_units,
+                        include_recitals=text_cfg.include_recitals,
+                        include_articles=text_cfg.include_articles,
+                        include_annexes=text_cfg.include_annexes,
+                    ):
+                        source_profile = _structure_profile(units)
+                        translated_profile = _structure_profile(translated_units)
                         logger.info(
                             "Translate-before-extract fallback for %s (%s → eng): "
-                            "%d structural units (was %d from source language).",
+                            "profile %s (was %s from source language).",
                             celex_id, language,
-                            _count_structural_units(translated_units),
-                            _count_structural_units(units),
+                            translated_profile,
+                            source_profile,
                         )
                         units = translated_units
                         cs = metadata.get("content_source") or ""
@@ -469,7 +556,7 @@ class Pipeline:
                 and text_cfg.include_recitals
             ):
                 original_units = self._fetch_original_recitals_with_source(celex_id, source)
-                units = original_units + [u for u in units if u["type"] != "recital"]
+                units = self._merge_original_recitals(units, original_units)
 
         # Paragraph extraction for communications, proposals, and staff
         # working documents — all share the COM prose templates.
@@ -493,8 +580,23 @@ class Pipeline:
                 and proc.fetch_original_relations_for_consolidated
             ):
                 original_celex = convert_consolidated_to_original(celex_id)
-                source.fetch_metadata(original_celex)  # primes the relation cache
-                relations.extend(source.fetch_relations(original_celex))
+                if original_celex in self._selected_ids:
+                    try:
+                        source.fetch_metadata(original_celex)  # primes the relation cache
+                    except TransientSourceError as exc:
+                        logger.warning(
+                            "Optional original-act relation lookup failed for %s: %s; "
+                            "keeping relations for %s only",
+                            original_celex, exc, celex_id,
+                        )
+                    else:
+                        relations.extend(source.fetch_relations(original_celex))
+                else:
+                    logger.warning(
+                        "Skipping original-act relations for %s because %s is "
+                        "not part of the resolved dataset",
+                        celex_id, original_celex,
+                    )
 
         # EuroVoc.
         eurovoc: list[dict] = []
@@ -514,7 +616,13 @@ class Pipeline:
         }
 
     @staticmethod
-    def _should_retry_with_pdf(units: list[dict], celex_id: str = "") -> bool:
+    def _should_retry_with_pdf(
+        units: list[dict],
+        *,
+        include_recitals: bool = True,
+        include_articles: bool = True,
+        include_annexes: bool = True,
+    ) -> bool:
         """Check if HTML extraction produced poor enough results to justify PDF retry.
 
         Heuristic: retry if we got no structured units, only body fallback,
@@ -522,9 +630,9 @@ class Pipeline:
         Decisions (D) legitimately have 0-1 recitals, so we're lenient with those.
         """
         if not units:
-            return True
+            return include_recitals or include_articles or include_annexes
         if all(u["type"] == "body" for u in units):
-            return True
+            return include_articles
 
         recitals = [u for u in units if u["type"] == "recital"]
         articles = [u for u in units if u["type"] == "article"]
@@ -532,9 +640,9 @@ class Pipeline:
         # Regulations and directives should have >1 recital.
         # Decisions may legitimately have few, but zero recitals with
         # multiple articles often signals table-structured HTML we can't parse.
-        if len(recitals) == 0 and len(articles) > 0:
+        if include_articles and not articles:
             return True
-        if len(recitals) <= 1 and len(articles) == 0:
+        if include_recitals and len(recitals) == 0 and len(articles) > 0:
             return True
         return False
 
@@ -656,7 +764,15 @@ class Pipeline:
             "Fetching original recitals for %s from %s",
             consolidated_celex, original_celex,
         )
-        fetch_result = source.fetch_content(original_celex)
+        try:
+            fetch_result = source.fetch_content(original_celex)
+        except TransientSourceError as exc:
+            logger.warning(
+                "Optional original-act recital fetch failed for %s: %s; "
+                "keeping consolidated extraction",
+                original_celex, exc,
+            )
+            return []
         if fetch_result is None:
             logger.warning(
                 "Could not fetch original act %s for recitals", original_celex
@@ -678,6 +794,26 @@ class Pipeline:
                 return [u for u in extracted if u.get("type") == "recital"]
         return []
 
+    @staticmethod
+    def _merge_original_recitals(
+        units: list[dict], original_units: list[dict],
+    ) -> list[dict]:
+        """Replace recitals while retaining translations for matching numbers."""
+        if not original_units:
+            return units
+        translations = {
+            unit.get("number"): unit.get("text_translated")
+            for unit in units
+            if unit.get("type") == "recital"
+            and unit.get("number") is not None
+            and unit.get("text_translated")
+        }
+        for unit in original_units:
+            translated = translations.get(unit.get("number"))
+            if translated:
+                unit["text_translated"] = translated
+        return original_units + [unit for unit in units if unit.get("type") != "recital"]
+
     def _report_missing_content(self) -> None:
         """Log and write a report of documents with no content or non-English content."""
         output_dir = Path(self.config.output.output_directory)
@@ -689,6 +825,8 @@ class Pipeline:
 
         missing = [(r[0], r[1]) for r in rows if r[3] is None]
         non_eng = [(r[0], r[1], r[2]) for r in rows if r[2] and r[2] != "eng"]
+        missing_path = output_dir / "missing_content.tsv"
+        non_english_path = output_dir / "non_english_content.tsv"
 
         if missing:
             logger.info(f"{len(missing)} document(s) with no content in any language:")
@@ -697,9 +835,10 @@ class Pipeline:
                 logger.info(f"  {cid}")
                 report_lines.append(f"{cid}\t{title}")
 
-            report_path = output_dir / "missing_content.tsv"
-            report_path.write_text("\n".join(report_lines), encoding="utf-8")
-            logger.info(f"Missing content report: {report_path}")
+            missing_path.write_text("\n".join(report_lines), encoding="utf-8")
+            logger.info(f"Missing content report: {missing_path}")
+        else:
+            missing_path.unlink(missing_ok=True)
 
         if non_eng:
             logger.info(f"{len(non_eng)} document(s) with non-English content:")
@@ -708,9 +847,10 @@ class Pipeline:
                 logger.info(f"  {cid} ({lang})")
                 report_lines.append(f"{cid}\t{lang}\t{title}")
 
-            report_path = output_dir / "non_english_content.tsv"
-            report_path.write_text("\n".join(report_lines), encoding="utf-8")
-            logger.info(f"Non-English content report: {report_path}")
+            non_english_path.write_text("\n".join(report_lines), encoding="utf-8")
+            logger.info(f"Non-English content report: {non_english_path}")
+        else:
+            non_english_path.unlink(missing_ok=True)
 
     def _report_extraction_stats(self) -> None:
         """Log detailed extraction statistics by failure mode."""
@@ -762,7 +902,12 @@ class Pipeline:
 
         if not logger.handlers:
             # File handler — verbose
-            fh = logging.FileHandler(output_dir / "pipeline.log")
+            fh = RotatingFileHandler(
+                output_dir / "pipeline.log",
+                maxBytes=10 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
             fh.setLevel(logging.DEBUG)
             fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
             logger.addHandler(fh)

@@ -24,13 +24,16 @@ class RateLimiter:
             self._last = time.monotonic()
 
 
-# Matches standard CELEX IDs like 32016R0679, 52005DC0229, 02016R0679-20210101
-CELEX_PATTERN = re.compile(r"^[0-9][0-9A-Za-z]+$")
+# Sector + four-digit year + document type + sector-specific identifier.
+CELEX_PATTERN = re.compile(
+    r"^[0-9][0-9]{4}[A-Z]{1,3}[0-9A-Z/()_.-]{2,}$",
+    re.IGNORECASE,
+)
 
 
 def is_valid_celex(celex_id: str) -> bool:
     """Check if a string looks like a valid CELEX ID."""
-    return bool(CELEX_PATTERN.match(celex_id)) and len(celex_id) >= 8
+    return bool(CELEX_PATTERN.fullmatch(celex_id))
 
 
 def is_consolidated_celex(celex_id: str) -> bool:

@@ -172,6 +172,7 @@ def _make_unit(
     text: str,
     subtype: str | None = None,
     paragraph_num: str | None = None,
+    subparagraph_num: str | None = None,
     point_letter: str | None = None,
 ) -> dict:
     return {
@@ -179,6 +180,7 @@ def _make_unit(
         "subtype": subtype,
         "number": number,
         "paragraph_num": paragraph_num,
+        "subparagraph_num": subparagraph_num,
         "point_letter": point_letter,
         "title": title,
         "text": text,
@@ -268,6 +270,11 @@ def _split_paragraph_into_points(
     # which must stay inside the point.
     subpara_start_re = re.compile(r"(?<=[.;:!?])\n\s*(?!\([a-z]{1,2}\)\s+)(?=[A-Z0-9])")
 
+    last_text_start = matches[-1].end()
+    trailing_match = subpara_start_re.search(para_text, last_text_start)
+    last_point_text_end = trailing_match.start() if trailing_match else len(para_text)
+    primary_subparagraph = "1" if trailing_match else None
+
     units: list[dict] = []
 
     # Stem: text before the first (a).
@@ -276,30 +283,30 @@ def _split_paragraph_into_points(
     if stem:
         units.append(_make_unit(
             number=number, title=title, text=stem,
-            paragraph_num=paragraph_num, point_letter=None, subtype=subtype,
+            paragraph_num=paragraph_num, subparagraph_num=primary_subparagraph,
+            point_letter=None, subtype=subtype,
         ))
 
     # Each point's text runs from its marker to the next point marker.
     # Continuation lines between two points belong to the preceding point.
     # For the LAST point, the text ends at the first subparagraph start (if
     # any) so the trailing qualifier becomes its own row.
-    last_point_text_end = len(para_text)
     for i, m in enumerate(matches):
         letter = m.group(1)
         text_start = m.end()
         if i + 1 < len(matches):
             text_end = matches[i + 1].start()
         else:
-            sp = subpara_start_re.search(para_text, text_start)
-            text_end = sp.start() if sp else len(para_text)
-            last_point_text_end = text_end
+            text_end = last_point_text_end
         point_text = _normalize_text(para_text[text_start:text_end])
         if not point_text:
             continue
         units.append(_make_unit(
             number=number, title=title if (i == 0 and not stem) else None,
             text=point_text,
-            paragraph_num=paragraph_num, point_letter=letter, subtype=subtype,
+            paragraph_num=paragraph_num,
+            subparagraph_num=primary_subparagraph,
+            point_letter=letter, subtype=subtype,
         ))
 
     # Trailing subparagraph after the last point.
@@ -308,7 +315,8 @@ def _split_paragraph_into_points(
         if trailing:
             units.append(_make_unit(
                 number=number, title=None, text=trailing,
-                paragraph_num=paragraph_num, point_letter=None, subtype=subtype,
+                paragraph_num=paragraph_num, subparagraph_num="2",
+                point_letter=None, subtype=subtype,
             ))
 
     return units if units else None
@@ -326,7 +334,7 @@ def _split_into_subparagraphs(
 
     Returns None if the text contains fewer than 2 sub-paragraphs.
     """
-    lines = [l.strip() for l in raw_para_text.split("\n") if l.strip()]
+    lines = [line.strip() for line in raw_para_text.split("\n") if line.strip()]
     if len(lines) < 2:
         return None
 
@@ -357,6 +365,7 @@ def _split_into_subparagraphs(
             title=title if i == 0 else None,
             text=text,
             paragraph_num=paragraph_num,
+            subparagraph_num=str(i + 1),
             point_letter=None,
             subtype=subtype,
         ))
@@ -401,6 +410,7 @@ def split_article(
     number: str | None,
     title: str | None,
     granularity: str = "article",
+    split_unnumbered_subparagraphs: bool = False,
 ) -> list[dict]:
     """Split an article body into text_units according to granularity.
 
@@ -476,13 +486,14 @@ def split_article(
                 units.extend(point_units)
                 continue
             # No lettered points — try sub-paragraph splitting.
-            subpara_units = _split_into_subparagraphs(
-                raw_para_text, number=number, title=row_title,
-                paragraph_num=marker, subtype=subtype,
-            )
-            if subpara_units:
-                units.extend(subpara_units)
-                continue
+            if split_unnumbered_subparagraphs:
+                subpara_units = _split_into_subparagraphs(
+                    raw_para_text, number=number, title=row_title,
+                    paragraph_num=marker, subtype=subtype,
+                )
+                if subpara_units:
+                    units.extend(subpara_units)
+                    continue
 
         units.append(_make_unit(
             number=number, title=row_title, text=para_text,

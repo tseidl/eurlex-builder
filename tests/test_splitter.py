@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from eurlex_builder.extractors.splitter import (
     is_amending_article,
     split_article,
@@ -488,3 +486,43 @@ def test_point_level_capitalized_wrapped_continuation_absorbed():
     assert len(units) == 3
     b_point = [u for u in units if u["point_letter"] == "b"][0]
     assert "Regulation (EU) 2016/679" in b_point["text"]
+
+
+def test_pdf_style_wrapped_lines_do_not_create_unnumbered_subparagraphs():
+    parts = [
+        "1. This provision applies to every controller established in the Union",
+        "Regulation requirements continue on this visually wrapped source line",
+    ]
+    units = split_article(parts, number="1", title=None, granularity="point")
+    assert len(units) == 1
+    assert "visually wrapped" in units[0]["text"]
+    assert units[0]["subparagraph_num"] is None
+
+
+def test_html_boundaries_can_emit_numbered_subparagraphs():
+    parts = [
+        "1. This is a complete first subparagraph with enough substantive legal text.",
+        "This is a complete second subparagraph with enough substantive legal text.",
+    ]
+    units = split_article(
+        parts,
+        number="1",
+        title=None,
+        granularity="point",
+        split_unnumbered_subparagraphs=True,
+    )
+    assert [unit["subparagraph_num"] for unit in units] == ["1", "2"]
+
+
+def test_trailing_subparagraph_gets_structural_number():
+    parts = [
+        "1. The following apply:",
+        "(a) first point;",
+        "(b) second point.",
+        "Point (b) shall not apply to public authorities.",
+    ]
+    units = split_article(parts, number="1", title=None, granularity="point")
+    primary = [unit for unit in units if unit.get("point_letter")]
+    trailing = [unit for unit in units if "public authorities" in unit["text"]]
+    assert all(unit["subparagraph_num"] == "1" for unit in primary)
+    assert trailing[0]["subparagraph_num"] == "2"

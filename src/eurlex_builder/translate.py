@@ -191,7 +191,6 @@ def translate_database(
             than this (default 100,000 chars, ~50 pages). Set to 0 to disable.
     """
     import duckdb
-    from tqdm import tqdm
 
     conn = duckdb.connect(db_path)
     try:

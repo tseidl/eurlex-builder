@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
@@ -19,8 +20,6 @@ logger = logging.getLogger("eurlex_builder")
 _PDF_TIMEOUT = 120
 
 # Lazy-loaded converter to avoid heavy import at module load.
-import threading
-
 _converter = None
 _converter_lock = threading.Lock()
 
@@ -84,6 +83,7 @@ class PdfExtractor:
                 include_articles=include_articles,
                 include_annexes=include_annexes,
                 article_granularity=article_granularity,
+                out_metadata=out_metadata,
             )
 
         try:
@@ -115,6 +115,7 @@ class PdfExtractor:
                     include_articles=include_articles,
                     include_annexes=include_annexes,
                     article_granularity=article_granularity,
+                    out_metadata=out_metadata,
                 )
             markdown = result.document.export_to_markdown()
         except Exception as exc:
@@ -125,6 +126,7 @@ class PdfExtractor:
                 include_articles=include_articles,
                 include_annexes=include_annexes,
                 article_granularity=article_granularity,
+                out_metadata=out_metadata,
             )
         finally:
             Path(tmp_path).unlink(missing_ok=True)
@@ -158,7 +160,7 @@ class PdfExtractor:
             unit["text"] = _clean_pdf_artifacts(unit["text"])
 
         # If no structured units found, return the full text as body.
-        if not units:
+        if not units and include_articles:
             units = [{
                 "type": "body",
                 "number": None,
@@ -179,6 +181,7 @@ class PdfExtractor:
         include_articles: bool = True,
         include_annexes: bool = True,
         article_granularity: str = "article",
+        out_metadata: dict | None = None,
     ) -> list[dict]:
         """Lightweight PDF text extraction via pymupdf when Docling fails."""
         try:
@@ -190,16 +193,21 @@ class PdfExtractor:
         try:
             doc = pymupdf.open(tmp_path)
             parts: list[str] = []
-            for page in doc:
-                text = page.get_text()
-                if text.strip():
-                    parts.append(text.strip())
-            doc.close()
+            try:
+                for page_number in range(doc.page_count):
+                    text = doc.load_page(page_number).get_text()
+                    if text.strip():
+                        parts.append(text.strip())
+            finally:
+                doc.close()
 
             full_text = "\n\n".join(parts)
             if not full_text:
                 logger.warning("pymupdf returned empty text for %s", celex_id)
                 return []
+
+            if out_metadata is not None:
+                out_metadata["markdown"] = full_text
 
             logger.info(
                 "pymupdf fallback extracted %d chars for %s", len(full_text), celex_id
@@ -223,7 +231,7 @@ class PdfExtractor:
                 "number": None,
                 "title": None,
                 "text": full_text,
-            }]
+            }] if include_articles else []
         except Exception as exc:
             logger.error("pymupdf fallback failed for %s: %s", celex_id, exc)
             return []
@@ -244,8 +252,14 @@ def extract_pdf_full_text(raw_content: bytes) -> str | None:
 
     try:
         doc = pymupdf.open(tmp_path)
-        parts = [page.get_text().strip() for page in doc if page.get_text().strip()]
-        doc.close()
+        try:
+            parts = []
+            for page_number in range(doc.page_count):
+                text = doc.load_page(page_number).get_text().strip()
+                if text:
+                    parts.append(text)
+        finally:
+            doc.close()
         return "\n\n".join(parts) if parts else None
     except Exception as exc:
         logger.warning("PDF full-text extraction failed: %s", exc)
@@ -483,14 +497,14 @@ def _parse_legislative_markdown(
                 # Continuation line for the current recital.
                 current_recital["_body"].append(stripped)
 
-        elif numbered_recital_re.match(stripped) and (
-            "WHEREAS" in stripped.upper() or "CONSIDERING" in stripped.upper()
+        elif (
+            (num_match := numbered_recital_re.match(stripped))
+            and ("WHEREAS" in stripped.upper() or "CONSIDERING" in stripped.upper())
         ):
             # Numbered recital with "Whereas" or "Considering" (translated FR/DE)
             # but no prior zone-marker line. E.g. "(1) Whereas...", "(1) Considering that..."
             _flush_recital()
             in_recital_zone = True
-            num_match = numbered_recital_re.match(stripped)
             current_recital = {
                 "type": "recital",
                 "number": num_match.group(1),

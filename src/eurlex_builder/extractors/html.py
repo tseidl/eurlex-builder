@@ -269,6 +269,7 @@ def _extract_standard_articles(tree, *, granularity: str = "article") -> list[di
         if body_parts or title:
             units.extend(split_article(
                 body_parts, number=number, title=title, granularity=granularity,
+                split_unnumbered_subparagraphs=True,
             ))
     return units
 
@@ -406,7 +407,10 @@ def _extract_manual_articles(tree, *, granularity: str = "article") -> list[dict
     title_paras = tree.xpath(
         ".//*[local-name()='p' and @class='Titrearticle']"
     )
+    consumed_titles: set = set()
     for p in title_paras:
+        if p in consumed_titles:
+            continue
         number = None
         article_title: str | None = None
 
@@ -444,8 +448,11 @@ def _extract_manual_articles(tree, *, granularity: str = "article") -> list[dict
             and sibling.get("class") == "Titrearticle"
             and not article_title
         ):
-            article_title = _extract_text(sibling)
-            sibling = sibling.getnext()
+            candidate_title = _extract_text(sibling)
+            if not re.match(r"^\s*Article\s+\d", candidate_title, re.IGNORECASE):
+                article_title = candidate_title
+                consumed_titles.add(sibling)
+                sibling = sibling.getnext()
 
         while sibling is not None:
             sib_class = sibling.get("class", "")
@@ -459,6 +466,7 @@ def _extract_manual_articles(tree, *, granularity: str = "article") -> list[dict
         if body_parts or article_title or number:
             units.extend(split_article(
                 body_parts, number=number, title=article_title, granularity=granularity,
+                split_unnumbered_subparagraphs=True,
             ))
     return units
 
@@ -554,6 +562,7 @@ def _extract_class_based_recitals(tree) -> list[dict]:
         text = _extract_text(p)
         if not text:
             continue
+        numbered_match = numbered_re.match(text)
 
         # Skip standalone "Whereas:" marker.
         if text.strip().rstrip(":").upper() == "WHEREAS":
@@ -570,9 +579,9 @@ def _extract_class_based_recitals(tree) -> list[dict]:
                 "text": cleaned,
             })
             pending_number = None
-        elif numbered_re.match(text) and len(text) < 10:
+        elif numbered_match and len(text) < 10:
             # Bare "(N)" — buffer it, text comes in the next <p>.
-            pending_number = numbered_re.match(text).group(1)
+            pending_number = numbered_match.group(1)
         elif pending_number is not None:
             # This is the recital text following a bare "(N)".
             full = f"({pending_number}) {text}"
@@ -585,17 +594,16 @@ def _extract_class_based_recitals(tree) -> list[dict]:
                 "text": cleaned,
             })
             pending_number = None
-        elif numbered_re.match(text) and len(text) >= 10:
+        elif numbered_match and len(text) >= 10:
             # Full "(N) text..." in one paragraph.
             # Skip footnote refs / inline cross-refs disguised as recitals.
             if _FOOTNOTE_REF_RE.match(text) or _INLINE_REF_START_RE.match(text):
                 continue
-            m = numbered_re.match(text)
             cleaned = _strip_recital_tail(text)
             units.append({
                 "type": "recital",
                 "subtype": _classify_recital(cleaned),
-                "number": m.group(1),
+                "number": numbered_match.group(1),
                 "title": None,
                 "text": cleaned,
             })
@@ -649,6 +657,7 @@ def _extract_class_based_articles(tree, *, granularity: str = "article") -> list
         if body_parts or number:
             units.extend(split_article(
                 body_parts, number=number, title=article_title, granularity=granularity,
+                split_unnumbered_subparagraphs=True,
             ))
     return units
 
@@ -734,9 +743,9 @@ def _extract_consolidated_norm_recitals(tree) -> list[dict]:
         if not text:
             continue
 
-        m = numbered_re.match(text)
-        if m and len(text) < 10:
-            pending_number = m.group(1)
+        numbered_match = numbered_re.match(text)
+        if numbered_match and len(text) < 10:
+            pending_number = numbered_match.group(1)
         elif pending_number is not None:
             full = f"({pending_number}) {text}"
             cleaned = _strip_recital_tail(full)
@@ -748,15 +757,14 @@ def _extract_consolidated_norm_recitals(tree) -> list[dict]:
                 "text": cleaned,
             })
             pending_number = None
-        elif numbered_re.match(text) and len(text) >= 10:
+        elif numbered_match and len(text) >= 10:
             if _FOOTNOTE_REF_RE.match(text) or _INLINE_REF_START_RE.match(text):
                 continue
-            m = numbered_re.match(text)
             cleaned = _strip_recital_tail(text)
             units.append({
                 "type": "recital",
                 "subtype": _classify_recital(cleaned),
-                "number": m.group(1),
+                "number": numbered_match.group(1),
                 "title": None,
                 "text": cleaned,
             })
@@ -793,7 +801,10 @@ def _extract_consolidated_norm_articles(
         while sibling is not None:
             sib_class = sibling.get("class", "")
             sib_tag = etree.QName(sibling).localname if isinstance(sibling.tag, str) else ""
-            if sib_class in ("title-article-norm", "title-division-1"):
+            if (
+                sib_class in ("title-article-norm", "title-division-1")
+                or sib_class.startswith("title-annex")
+            ):
                 break
             if sib_class in _CONSOLIDATED_NORM_SKIP or sib_class.startswith("title-"):
                 sibling = sibling.getnext()
@@ -814,7 +825,57 @@ def _extract_consolidated_norm_articles(
             units.extend(split_article(
                 body_parts, number=number, title=article_title,
                 granularity=granularity,
+                split_unnumbered_subparagraphs=True,
             ))
+
+    return units
+
+
+def _extract_consolidated_norm_annexes(tree) -> list[dict]:
+    """Extract annexes whose headings use consolidated ``title-annex`` classes."""
+    units: list[dict] = []
+    headings = tree.xpath(
+        ".//*[starts-with(@class, 'title-annex')]"
+    )
+
+    for heading in headings:
+        heading_text = _extract_text(heading)
+        match = re.match(
+            r"^ANNEX\s*([IVXLCDMivxlcdm0-9]*)\s*(.*)",
+            heading_text,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+
+        number = match.group(1).strip() or None
+        title = match.group(2).strip() or None
+        sibling = heading.getnext()
+        if sibling is not None and sibling.get("class", "").startswith("stitle-annex"):
+            title = _extract_text(sibling).strip() or title
+            sibling = sibling.getnext()
+
+        body_parts: list[str] = []
+        while sibling is not None:
+            sib_class = sibling.get("class", "") or ""
+            if sib_class.startswith(("title-annex", "title-article")):
+                break
+            if sib_class in _CONSOLIDATED_NORM_SKIP:
+                sibling = sibling.getnext()
+                continue
+            part = _extract_text(sibling)
+            if part:
+                body_parts.append(part)
+            sibling = sibling.getnext()
+
+        text = " ".join(body_parts)
+        if text or title or number:
+            units.append({
+                "type": "annex",
+                "number": number,
+                "title": title,
+                "text": text,
+            })
 
     return units
 
@@ -957,6 +1018,7 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                     number=current_article.get("number"),
                     title=title,
                     granularity=article_granularity,
+                    split_unnumbered_subparagraphs=True,
                 ))
             current_article = None
 
@@ -1116,12 +1178,14 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                     "text": cleaned,
                 })
 
-        elif numbered_recital_re.match(text) and "WHEREAS" in text.upper():
+        elif (
+            (num_match := numbered_recital_re.match(text))
+            and "WHEREAS" in text.upper()
+        ):
             # Numbered recital with "Whereas" but no prior "Whereas:" marker.
             # E.g. "(1) Whereas within the framework..."
             in_recital_zone = True
             if include_recitals:
-                num_match = numbered_recital_re.match(text)
                 cleaned = _strip_recital_tail(text)
                 units.append({
                     "type": "recital",
@@ -1159,10 +1223,13 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                     "text": cleaned,
                 })
 
-        elif numbered_recital_re.match(text) and not current_article and not current_annex:
+        elif (
+            (num_match := numbered_recital_re.match(text))
+            and not current_article
+            and not current_annex
+        ):
             # Bare numbered recital without "Whereas" marker — enter recital zone
             # if this looks like the start of a recital sequence (starts with (1)).
-            num_match = numbered_recital_re.match(text)
             num_val = int(num_match.group(1))
             if num_val == 1 or in_recital_zone or (units and units[-1].get("type") == "recital"):
                 # Skip footnotes / inline refs disguised as recitals.
@@ -1699,25 +1766,34 @@ class HtmlExtractor:
     @staticmethod
     def _try_standard(tree, inc_rec, inc_art, inc_anx, granularity="article") -> list[dict]:
         units: list[dict] = []
-        if inc_rec: units.extend(_extract_standard_recitals(tree))
-        if inc_art: units.extend(_extract_standard_articles(tree, granularity=granularity))
-        if inc_anx: units.extend(_extract_standard_annexes(tree))
+        if inc_rec:
+            units.extend(_extract_standard_recitals(tree))
+        if inc_art:
+            units.extend(_extract_standard_articles(tree, granularity=granularity))
+        if inc_anx:
+            units.extend(_extract_standard_annexes(tree))
         return units
 
     @staticmethod
     def _try_manual(tree, inc_rec, inc_art, inc_anx, granularity="article") -> list[dict]:
         units: list[dict] = []
-        if inc_rec: units.extend(_extract_manual_recitals(tree))
-        if inc_art: units.extend(_extract_manual_articles(tree, granularity=granularity))
-        if inc_anx: units.extend(_extract_manual_annexes(tree))
+        if inc_rec:
+            units.extend(_extract_manual_recitals(tree))
+        if inc_art:
+            units.extend(_extract_manual_articles(tree, granularity=granularity))
+        if inc_anx:
+            units.extend(_extract_manual_annexes(tree))
         return units
 
     @staticmethod
     def _try_class_based(tree, inc_rec, inc_art, inc_anx, granularity="article") -> list[dict]:
         units: list[dict] = []
-        if inc_rec: units.extend(_extract_class_based_recitals(tree))
-        if inc_art: units.extend(_extract_class_based_articles(tree, granularity=granularity))
-        if inc_anx: units.extend(_extract_class_based_annexes(tree))
+        if inc_rec:
+            units.extend(_extract_class_based_recitals(tree))
+        if inc_art:
+            units.extend(_extract_class_based_articles(tree, granularity=granularity))
+        if inc_anx:
+            units.extend(_extract_class_based_annexes(tree))
         return units
 
     @staticmethod
@@ -1727,6 +1803,8 @@ class HtmlExtractor:
             units.extend(_extract_consolidated_norm_recitals(tree))
         if inc_art:
             units.extend(_extract_consolidated_norm_articles(tree, granularity=granularity))
+        if inc_anx:
+            units.extend(_extract_consolidated_norm_annexes(tree))
         return units
 
     @staticmethod
@@ -1861,7 +1939,7 @@ class HtmlExtractor:
 
         # Fallback: extract entire body as a single "body" text unit.
         # Useful for communications and other non-legislative documents.
-        if not units:
+        if not units and include_articles:
             body_text = _extract_full_body(tree)
             if body_text:
                 units.append({

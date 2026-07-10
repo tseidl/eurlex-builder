@@ -8,6 +8,20 @@ import sys
 from eurlex_builder import __version__
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="eurlex-builder",
@@ -19,7 +33,11 @@ def main(argv: list[str] | None = None) -> None:
     # run subcommand
     run_parser = sub.add_parser("run", help="Run the pipeline with a config file.")
     run_parser.add_argument("config", help="Path to YAML configuration file.")
-    run_parser.add_argument("--fresh", action="store_true", help="Ignore existing checkpoints and re-process all documents from scratch.")
+    run_parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Clear selected checkpoints and re-process those documents.",
+    )
     run_parser.add_argument("--retry-failed", action="store_true", help="Re-attempt previously failed documents.")
 
     # status subcommand
@@ -32,7 +50,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     translate_parser.add_argument("db", help="Path to DuckDB database file.")
     translate_parser.add_argument(
-        "--max-full-text-chars", type=int, default=100_000,
+        "--max-full-text-chars", type=_nonnegative_int, default=100_000,
         help="Skip full_text translation for documents longer than this "
         "(default: 100000). Text units are still translated. Set to 0 to disable.",
     )
@@ -56,8 +74,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Categories to enrich (default: all).",
     )
     enrich_parser.add_argument("--parallel", action="store_true", help="Fetch SPARQL in parallel.")
-    enrich_parser.add_argument("--max-workers", type=int, default=4, help="Number of parallel workers (default: 4).")
+    enrich_parser.add_argument("--max-workers", type=_positive_int, default=4, help="Number of parallel workers (default: 4).")
     enrich_parser.add_argument("--force", action="store_true", help="Re-enrich already enriched documents.")
+
+    validate_parser = sub.add_parser(
+        "validate", help="Validate dataset integrity without modifying the database."
+    )
+    validate_parser.add_argument("db", help="Path to DuckDB database file.")
 
     args = parser.parse_args(argv)
 
@@ -75,6 +98,8 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "enrich":
         _enrich(args.db, select=args.select, parallel=args.parallel,
                 max_workers=args.max_workers, force=args.force)
+    elif args.command == "validate":
+        _validate(args.db)
     else:
         parser.print_help()
         sys.exit(1)
@@ -132,11 +157,33 @@ def _status(db_path: str) -> None:
     from eurlex_builder.storage.duckdb import DuckDBStore
 
     store = DuckDBStore(db_path)
-    summary = store.get_summary()
-    print(f"Processed: {summary.get('processed', 0)}")
-    print(f"Failed:    {summary.get('failed', 0)}")
-    failed = summary.get("failed_details", {})
-    if failed:
-        print("\nFailed documents:")
-        for celex_id, error in failed.items():
-            print(f"  {celex_id}: {error}")
+    try:
+        summary = store.get_summary()
+        print(f"Processed: {summary.get('processed', 0)}")
+        print(f"Failed:    {summary.get('failed', 0)}")
+        failed = summary.get("failed_details", {})
+        if failed:
+            print("\nFailed documents:")
+            for celex_id, error in failed.items():
+                print(f"  {celex_id}: {error}")
+    finally:
+        store.close()
+
+
+def _validate(db_path: str) -> None:
+    _require_db(db_path)
+    from eurlex_builder.validate import validate_database
+
+    issues = validate_database(db_path)
+    if not issues:
+        print("Validation passed: no integrity issues found.")
+        return
+
+    for issue in issues:
+        detail = f" ({issue['detail']})" if issue.get("detail") else ""
+        print(
+            f"{str(issue['severity']).upper()}: {issue['code']} "
+            f"[{issue['count']}]{detail}"
+        )
+    if any(issue["severity"] == "error" for issue in issues):
+        raise SystemExit(1)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime
 from urllib.parse import quote
 
@@ -12,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from SPARQLWrapper import SPARQLWrapper
 
+from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.utils import RateLimiter, get_document_type, resolve_doc_type
 
 logger = logging.getLogger("eurlex_builder")
@@ -27,9 +29,9 @@ _INCLUDE_KEYWORDS = {"ACT"}
 _EXCLUDE_KEYWORDS = {"annexe", "annex", "cover", "erratum", "corrigendum"}
 
 DEFAULT_TIMEOUT = 20
+DISCOVERY_TIMEOUT = 120
+HTML_ACCEPT = "application/xhtml+xml, text/html;q=0.9"
 
-
-import time
 
 # Minimum seconds between REST requests, shared across all threads (~10/sec).
 _rate_limiter = RateLimiter(0.1)
@@ -42,22 +44,37 @@ LANGUAGE_CHAIN = ["eng", "fra", "deu", "ita", "nld", "spa"]
 _LANG_URI_SUFFIX = {lang: lang.upper() for lang in LANGUAGE_CHAIN}
 
 
-def _sparql_query(query: str, *, retries: int = 3, label: str = "SPARQL") -> dict | None:
+def _sparql_query(
+    query: str,
+    *,
+    retries: int = 3,
+    label: str = "SPARQL",
+    raise_on_failure: bool = False,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> dict | None:
     """Execute a SPARQL query with retry on transient failures."""
+    last_error: Exception | None = None
     for attempt in range(retries):
         try:
             sparql = SPARQLWrapper(CELLAR_SPARQL_ENDPOINT)
             sparql.setQuery(query)
             sparql.setReturnFormat("json")
-            return sparql.query().convert()
+            sparql.setTimeout(timeout)
+            converted = sparql.query().convert()
+            if not isinstance(converted, dict):
+                raise TypeError(f"{label} returned {type(converted).__name__}, not JSON")
+            return converted
         except Exception as exc:
+            last_error = exc
             if attempt < retries - 1:
                 wait = 2 ** attempt
                 logger.debug("%s attempt %d failed: %s — retrying in %ds", label, attempt + 1, exc, wait)
                 time.sleep(wait)
             else:
                 logger.error("%s failed after %d attempts: %s", label, retries, exc)
-                return None
+    if raise_on_failure:
+        raise TransientSourceError(f"{label} failed after {retries} attempts") from last_error
+    return None
 
 
 def _create_session() -> requests.Session:
@@ -341,8 +358,7 @@ def _build_descriptive_query(
         sectors.add(sector)
 
     if not type_conditions:
-        logger.error("No valid document types after mapping — query will return nothing")
-        return ""
+        raise ValueError("No supported document types remain after mapping")
 
     type_filter = f"FILTER({' || '.join(type_conditions)})"
     sector_conditions = [f'?sector = "{s}"^^xsd:string' for s in sorted(sectors)]
@@ -393,12 +409,13 @@ WHERE {{
 class CellarSource:
     """Fetches EU legislative data from the Cellar SPARQL endpoint and REST API."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.session = _create_session()
         # Cache relations and EuroVoc keyed by celex_id so fetch_* can return
         # them without a second SPARQL query.
         self._cached_relations: dict[str, list[dict]] = {}
         self._cached_eurovoc: dict[str, list[dict]] = {}
+        self._pdf_manifest_cache: dict[str, dict[str, str]] = {}
 
     def resolve_celex_ids(
         self,
@@ -421,13 +438,17 @@ class CellarSource:
         )
         logger.debug("Descriptive SPARQL query:\n%s", query)
 
-        result = _sparql_query(query, label=f"Descriptive SPARQL")
-        if result is None:
-            return []
+        result = _sparql_query(
+            query,
+            label="Descriptive SPARQL",
+            raise_on_failure=True,
+            timeout=DISCOVERY_TIMEOUT,
+        )
+        assert result is not None
 
         bindings = result.get("results", {}).get("bindings", [])
         ids = sorted(
-            {_parse_value(b["celex"]) for b in bindings if b.get("celex")}
+            {str(_parse_value(b["celex"])) for b in bindings if b.get("celex")}
         )
         logger.info("Descriptive query returned %d CELEX IDs", len(ids))
         return ids
@@ -444,9 +465,12 @@ class CellarSource:
         """
         query = _build_metadata_query(celex_id)
 
-        result = _sparql_query(query, label=f"Metadata SPARQL for {celex_id}")
-        if result is None:
-            return self._empty_metadata(celex_id)
+        result = _sparql_query(
+            query,
+            label=f"Metadata SPARQL for {celex_id}",
+            raise_on_failure=True,
+        )
+        assert result is not None
 
         bindings = result.get("results", {}).get("bindings", [])
 
@@ -538,27 +562,40 @@ class CellarSource:
 
         # Per language: try HTML then PDF before moving to next language.
         # This ensures English PDF is preferred over French HTML.
+        transient_errors: list[TransientSourceError] = []
+        pdf_lookup_failed = False
         for lang in self.LANGUAGE_CHAIN:
-            # Try HTML.
-            for accept, ctype in [
-                ("application/xhtml+xml", "html"),
-                ("text/html", "html"),
-            ]:
-                headers = {"Accept": accept, "Accept-Language": lang}
+            headers = {"Accept": HTML_ACCEPT, "Accept-Language": lang}
+            try:
                 content = self._fetch_with_300_handling(url, headers, celex_id)
+            except TransientSourceError as exc:
+                transient_errors.append(exc)
+            else:
                 if content is not None:
                     if lang != "eng":
                         logger.info(
                             "Content for %s found in %s (not English)",
                             celex_id, lang,
                         )
-                    return (_flatten_content_divs(content, celex_id), ctype, lang)
+                    return (_flatten_content_divs(content, celex_id), "html", lang)
 
             # Try PDF for this language before falling back to next language.
-            pdf_result = self._fetch_pdf_for_lang(celex_id, lang)
+            if pdf_lookup_failed:
+                continue
+            try:
+                pdf_result = self._fetch_pdf_for_lang(celex_id, lang)
+            except TransientSourceError as exc:
+                transient_errors.append(exc)
+                pdf_lookup_failed = True
+                continue
             if pdf_result is not None:
                 return pdf_result
 
+        if transient_errors:
+            raise TransientSourceError(
+                f"Content retrieval for {celex_id} had "
+                f"{len(transient_errors)} transient failure(s)"
+            ) from transient_errors[-1]
         logger.warning("No content retrieved for %s in any language/format", celex_id)
         return None
 
@@ -567,10 +604,19 @@ class CellarSource:
         manifests = self._get_pdf_manifests(celex_id)
         if not manifests:
             return None
+        transient_errors: list[TransientSourceError] = []
         for lang in self.LANGUAGE_CHAIN:
-            result = self._try_pdf_manifest(celex_id, lang, manifests)
+            try:
+                result = self._try_pdf_manifest(celex_id, lang, manifests)
+            except TransientSourceError as exc:
+                transient_errors.append(exc)
+                continue
             if result:
                 return result
+        if transient_errors:
+            raise TransientSourceError(
+                f"PDF retrieval for {celex_id} had transient failures"
+            ) from transient_errors[-1]
         return None
 
     def _fetch_pdf_for_lang(
@@ -584,10 +630,8 @@ class CellarSource:
 
     def _get_pdf_manifests(self, celex_id: str) -> dict[str, str]:
         """Query SPARQL for PDF manifestation URIs, return {lang_code: manifest_uri}."""
-        # Cache to avoid repeated SPARQL queries for the same doc.
-        cache_key = f"_pdf_manifests_{celex_id}"
-        if hasattr(self, cache_key):
-            return getattr(self, cache_key)
+        if celex_id in self._pdf_manifest_cache:
+            return self._pdf_manifest_cache[celex_id]
 
         encoded = quote(celex_id, safe="")
 
@@ -604,7 +648,12 @@ SELECT ?manifest ?lang WHERE {{
     FILTER(CONTAINS(STR(?format), "pdf"))
 }}
 """
-        result = _sparql_query(query, label=f"PDF manifest SPARQL for {celex_id}")
+        result = _sparql_query(
+            query,
+            label=f"PDF manifest SPARQL for {celex_id}",
+            raise_on_failure=True,
+        )
+        assert result is not None
         manifest_by_lang: dict[str, str] = {}
         if result:
             for b in result.get("results", {}).get("bindings", []):
@@ -615,7 +664,7 @@ SELECT ?manifest ?lang WHERE {{
                     if lang_suffix == sparql_code:
                         manifest_by_lang[our_code] = manifest_uri
 
-        setattr(self, cache_key, manifest_by_lang)
+        self._pdf_manifest_cache[celex_id] = manifest_by_lang
         return manifest_by_lang
 
     def _try_pdf_manifest(
@@ -635,8 +684,9 @@ SELECT ?manifest ?lang WHERE {{
                     item_url, headers={"Accept": "*/*"}, timeout=DEFAULT_TIMEOUT
                 )
             except requests.RequestException as exc:
-                logger.debug("PDF fetch failed for %s (%s): %s", celex_id, lang, exc)
-                return None
+                raise TransientSourceError(
+                    f"PDF request failed for {celex_id} ({lang})"
+                ) from exc
 
             if resp.status_code == 200 and resp.content[:5] == b"%PDF-":
                 if lang != "eng":
@@ -646,8 +696,20 @@ SELECT ?manifest ?lang WHERE {{
                 else:
                     logger.debug("PDF fetched for %s (English)", celex_id)
                 return (resp.content, "pdf", lang)
+            if resp.status_code == 200:
+                logger.warning(
+                    "Manifest item DOC_%d for %s (%s) was not a PDF",
+                    doc_n, celex_id, lang,
+                )
+                continue
             if resp.status_code == 404:
                 continue
+            if resp.status_code == 403:
+                break
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise TransientSourceError(
+                    f"HTTP {resp.status_code} fetching PDF for {celex_id} ({lang})"
+                )
             # Non-404, non-200: stop trying higher doc numbers.
             break
         return None
@@ -703,15 +765,18 @@ ORDER BY ?keyword ?label
 """
             logger.debug("EuroVoc %s query:\n%s", label_predicate, query)
 
-            result = _sparql_query(query, label=f"EuroVoc {label_predicate}")
-            if result is None:
-                continue
+            result = _sparql_query(
+                query,
+                label=f"EuroVoc {label_predicate}",
+                raise_on_failure=True,
+            )
+            assert result is not None
 
             bindings = result.get("results", {}).get("bindings", [])
             for binding in bindings:
-                keyword = _parse_value(binding.get("keyword", {}))
-                concept = _parse_value(binding.get("concept", {}))
-                label = _parse_value(binding.get("label", {}))
+                keyword = str(_parse_value(binding.get("keyword", {})))
+                concept = str(_parse_value(binding.get("concept", {})))
+                label = str(_parse_value(binding.get("label", {})))
 
                 if keyword in results:
                     results[keyword].setdefault(concept, set()).add(label)
@@ -764,12 +829,16 @@ ORDER BY ?type ?text
             logger.error("Concept info query failed for %s: %s", concept_uri, exc)
             return {}
 
+        if not isinstance(result, dict):
+            logger.error("Concept info query returned non-JSON for %s", concept_uri)
+            return {}
+
         info: dict[str, list[str]] = {
             "definition": [], "broader": [], "narrower": [], "related": [],
         }
         for b in result.get("results", {}).get("bindings", []):
-            t = _parse_value(b.get("type", {}))
-            text = _parse_value(b.get("text", {}))
+            t = str(_parse_value(b.get("type", {})))
+            text = str(_parse_value(b.get("text", {})))
             if t in info:
                 info[t].append(text)
 
@@ -817,9 +886,10 @@ WHERE {{
 """
         logger.debug("Procedure resolution SPARQL query:\n%s", query)
 
-        result = _sparql_query(query, label="Procedure resolution SPARQL")
-        if result is None:
-            return []
+        result = _sparql_query(
+            query, label="Procedure resolution SPARQL", raise_on_failure=True,
+        )
+        assert result is not None
 
         bindings = result.get("results", {}).get("bindings", [])
 
@@ -827,9 +897,9 @@ WHERE {{
         procedure_celex: dict[str, set[str]] = {pn: set() for pn in procedure_numbers}
 
         for binding in bindings:
-            procedure = _parse_value(binding.get("procedure", {}))
-            proposal = _parse_value(binding.get("proposalCelex", {}))
-            work = _parse_value(binding.get("availableWorkCelex", {}))
+            procedure = str(_parse_value(binding.get("procedure", {})))
+            proposal = str(_parse_value(binding.get("proposalCelex", {})))
+            work = str(_parse_value(binding.get("availableWorkCelex", {})))
 
             if procedure not in procedure_celex:
                 continue
@@ -864,8 +934,7 @@ WHERE {{
         try:
             response = self.session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
         except requests.RequestException as exc:
-            logger.warning("Request failed for %s: %s", celex_id, exc)
-            return None
+            raise TransientSourceError(f"Request failed for {celex_id}") from exc
 
         if response.status_code == 300:
             logger.debug("Received 300 Multiple Choices for %s", celex_id)
@@ -885,12 +954,9 @@ WHERE {{
                     selected_url, headers=headers, timeout=DEFAULT_TIMEOUT
                 )
             except requests.RequestException as exc:
-                logger.warning(
-                    "Request for selected 300 candidate failed for %s: %s",
-                    celex_id,
-                    exc,
-                )
-                return None
+                raise TransientSourceError(
+                    f"Selected 300 candidate request failed for {celex_id}"
+                ) from exc
 
         if response.status_code == 200:
             # An empty 200 body is as useless as a 404.
@@ -903,22 +969,15 @@ WHERE {{
                 celex_id,
                 headers.get("Accept"),
             )
+        elif response.status_code == 300:
+            logger.warning("Nested 300 response for %s", celex_id)
+        elif response.status_code == 429 or response.status_code >= 500:
+            raise TransientSourceError(
+                f"HTTP {response.status_code} retrieving content for {celex_id}"
+            )
         else:
-            # Includes nested 300s and other unexpected statuses — never store
-            # a non-200 payload (e.g. a Multiple Choices page) as document content.
             logger.warning(
-                "HTTP %d for %s: %s", response.status_code, celex_id, response.reason
+                "HTTP %d retrieving content for %s; treating it as unavailable",
+                response.status_code, celex_id,
             )
         return None
-
-    @staticmethod
-    def _empty_metadata(celex_id: str) -> dict:
-        """Return a metadata dict with empty values."""
-        return {
-            "celex_id": celex_id,
-            "title": None,
-            "date_adopted": None,
-            "document_type": get_document_type(celex_id),
-            "language": None,
-            "full_text_html": None,
-        }

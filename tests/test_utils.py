@@ -11,6 +11,11 @@ from eurlex_builder.utils import (
 def test_valid_celex():
     assert is_valid_celex("32016R0679")
     assert is_valid_celex("52005DC0229")
+    assert is_valid_celex("52001DC0775(02)")
+    assert is_valid_celex("02016R0679-20210101")
+    assert is_valid_celex("12012E/TXT")
+    assert is_valid_celex("72016L0680AUT_236812")
+    assert not is_valid_celex("32016R0")
     assert not is_valid_celex("abc")
     assert not is_valid_celex("")
 

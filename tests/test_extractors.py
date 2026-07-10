@@ -10,10 +10,11 @@ Currently covers:
 
 from __future__ import annotations
 
-import re
+from lxml import etree
 
-from eurlex_builder.extractors.html import _INLINE_REF_START_RE
+from eurlex_builder.extractors.html import HtmlExtractor, _INLINE_REF_START_RE, _walk_article_body
 from eurlex_builder.extractors.pdf import _parse_legislative_markdown
+from eurlex_builder.pipeline import _should_run_translate_fallback
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +129,6 @@ def test_pdf_parser_recognizes_have_adopted_decision_variant():
 # Translate-before-extract fallback (option 2) — heuristic lives in Pipeline
 # now, so it sees doc_type as well.
 # ---------------------------------------------------------------------------
-
-from eurlex_builder.pipeline import _should_run_translate_fallback
-
 
 def test_fallback_does_not_fire_for_english():
     units = []
@@ -302,10 +300,6 @@ def test_pdf_parser_recognizes_considering_inline_as_old_style_recital():
 # ---------------------------------------------------------------------------
 # Consolidated HTML — point-level splitting with amendment markers
 # ---------------------------------------------------------------------------
-
-from eurlex_builder.extractors.html import HtmlExtractor, _walk_article_body
-from lxml import etree
-
 
 def _make_consolidated_article_html(article_num: str, body_xml: str) -> bytes:
     """Build a minimal XHTML doc with one consolidated-format article."""
@@ -542,11 +536,16 @@ def test_text_only_extracts_annex_after_signature():
 # the fallback (recital count is always zero and says nothing about quality).
 # ---------------------------------------------------------------------------
 
-def test_fallback_does_not_fire_when_recitals_disabled():
+def test_fallback_without_recitals_uses_requested_article_quality():
     from eurlex_builder.pipeline import _should_run_translate_fallback
 
+    assert _should_run_translate_fallback(
+        [], "regulation", "fra",
+        include_recitals=False, include_articles=True, include_annexes=False,
+    )
     assert not _should_run_translate_fallback(
-        [], "regulation", "fra", include_recitals=False,
+        [{"type": "article", "number": "1"}], "regulation", "fra",
+        include_recitals=False, include_articles=True, include_annexes=False,
     )
     assert _should_run_translate_fallback(
         [], "regulation", "fra", include_recitals=True,
@@ -675,3 +674,116 @@ def test_class_based_empty_subtitle_yields_null_title():
     art = [u for u in units if u["type"] == "article"][0]
     assert art["title"] is None
     assert "necessary measures" in art["text"]
+
+
+def test_manual_css_consumed_subtitle_is_not_emitted_as_duplicate_article():
+    raw = b"""<html><body>
+    <p class="Titrearticle">Article 1</p>
+    <p class="Titrearticle">Scope</p>
+    <p class="Normal">This Regulation applies to relevant operators.</p>
+    <p class="Titrearticle">Article 2</p>
+    <p class="Normal">It shall enter into force.</p>
+    </body></html>"""
+    articles = [
+        unit for unit in HtmlExtractor().extract("TEST", raw)
+        if unit["type"] == "article"
+    ]
+    assert [(unit["number"], unit["title"]) for unit in articles] == [
+        ("1", "Scope"), ("2", None),
+    ]
+
+
+def test_manual_css_subtitle_that_mentions_article_is_consumed():
+    raw = b"""<html><body>
+    <p class="Titrearticle">Article 1</p>
+    <p class="Titrearticle">Amendments to Article 12 of Regulation (EU) 2019/1</p>
+    <p class="Normal">The amendments shall apply.</p>
+    <p class="Titrearticle">Article 2</p>
+    <p class="Normal">It shall enter into force.</p>
+    </body></html>"""
+    articles = [
+        unit for unit in HtmlExtractor().extract("TEST", raw)
+        if unit["type"] == "article"
+    ]
+    assert [(unit["number"], unit["title"]) for unit in articles] == [
+        ("1", "Amendments to Article 12 of Regulation (EU) 2019/1"),
+        ("2", None),
+    ]
+    assert "amendments shall apply" in articles[0]["text"]
+
+
+def test_consolidated_norm_annex_does_not_bleed_into_last_article():
+    raw = b"""<html><body>
+    <p class="title-article-norm">Article 1</p>
+    <p class="norm">The operative provision.</p>
+    <p class="title-annex-norm">ANNEX I</p>
+    <p class="stitle-annex-norm">Product list</p>
+    <p class="norm">Annex content.</p>
+    </body></html>"""
+    units = HtmlExtractor().extract("TEST", raw)
+    article = [unit for unit in units if unit["type"] == "article"][0]
+    annex = [unit for unit in units if unit["type"] == "annex"][0]
+    assert article["text"] == "The operative provision."
+    assert annex["number"] == "I"
+    assert annex["title"] == "Product list"
+    assert annex["text"] == "Annex content."
+
+
+def test_consolidated_norm_article_keeps_prose_starting_with_annex():
+    raw = b"""<html><body>
+    <p class="title-article-norm">Article 1</p>
+    <p class="norm">Annex I to this Regulation shall apply from 1 January.</p>
+    <p class="norm">Member States shall comply.</p>
+    <p class="title-annex-norm">ANNEX I</p>
+    <p class="norm">Actual annex content.</p>
+    </body></html>"""
+    units = HtmlExtractor().extract("TEST", raw)
+    article = [unit for unit in units if unit["type"] == "article"][0]
+    assert "Annex I to this Regulation" in article["text"]
+    assert "Member States shall comply" in article["text"]
+
+
+def test_html_body_fallback_respects_disabled_articles():
+    raw = b"<html><body><div id='art_1'><p>Excluded article.</p></div></body></html>"
+    units = HtmlExtractor().extract(
+        "TEST",
+        raw,
+        include_recitals=False,
+        include_articles=False,
+        include_annexes=False,
+    )
+    assert units == []
+
+
+def test_pymupdf_fallback_exposes_text_for_translation(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+    from eurlex_builder.extractors.pdf import PdfExtractor
+
+    class FakePage:
+        def get_text(self):
+            return "Article 1\nOperative text."
+
+    class FakeDoc(list):
+        @property
+        def page_count(self):
+            return len(self)
+
+        def load_page(self, page_number):
+            return self[page_number]
+
+        def close(self):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pymupdf",
+        SimpleNamespace(open=lambda path: FakeDoc([FakePage()])),
+    )
+    pdf_path = tmp_path / "source.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+    metadata = {}
+    PdfExtractor._pymupdf_fallback(
+        str(pdf_path), "TEST", out_metadata=metadata,
+    )
+    assert metadata["markdown"] == "Article 1\nOperative text."

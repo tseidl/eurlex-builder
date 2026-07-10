@@ -1,10 +1,10 @@
-# Full EU corpus: R + L + D + COM, 1979–present
+# Full EU corpus: R + L + D + COM, 1979 through the configured cutoff
 # ~160K documents. COMs add ~12K; PDF/Docling fallback for pre-1990s.
 
 metadata:
-  project_name: "EU Legislative Corpus 1952-2026"
+  project_name: "EU Legislative Corpus 1979-2026"
   author: "Timo Seidl"
-  description: "Complete EU legislative corpus: all regulations, directives, and decisions (including implementing/delegated variants), 1990-present."
+  description: "EU regulations, directives, decisions, and communications from 1979 through the configured 2026 cutoff."
 
 data:
   mode: "descriptive"
@@ -21,7 +21,7 @@ processing:
   text_extraction:
     include_recitals: true
     include_articles: true
-    include_annexes: true            # annexes stored in DuckDB; parquet export filters them out
+    include_annexes: true            # annexes are stored and exported
     strip_boilerplate: true
     article_granularity: paragraph   # split articles into numbered paragraphs ("article" | "paragraph" | "point")
   translation:

@@ -27,3 +27,12 @@ def test_checkpoint_reset(store):
     store.mark_processed("32016R0679")
     store.reset()
     assert not store.is_processed("32016R0679")
+
+
+def test_checkpoint_reset_ids_preserves_unselected_rows(store):
+    store.mark_processed("32016R0679")
+    store.mark_processed("32024R1689")
+
+    assert store.reset_ids(["32016R0679", "MISSING"]) == 1
+    assert not store.is_processed("32016R0679")
+    assert store.is_processed("32024R1689")

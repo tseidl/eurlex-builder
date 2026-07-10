@@ -7,10 +7,16 @@ from pathlib import Path
 from typing import Annotated, Literal, Union
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from eurlex_builder.utils import is_valid_celex
 
 
-class Metadata(BaseModel):
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Metadata(StrictModel):
     project_name: str = "eurlex-builder Dataset"
     author: str = ""
     description: str = "A dataset built with eurlex-builder."
@@ -18,10 +24,19 @@ class Metadata(BaseModel):
     version: str = "1.0"
 
 
-class FixedMode(BaseModel):
+class FixedMode(StrictModel):
     mode: Literal["fixed"] = "fixed"
     celex_ids: list[str] = Field(default_factory=list)
     procedure_numbers: list[str] = Field(default_factory=list)
+
+    @field_validator("celex_ids", mode="before")
+    @classmethod
+    def valid_celex_ids(cls, values):
+        normalized = [str(value).strip().upper() for value in (values or [])]
+        invalid = [value for value in normalized if not is_valid_celex(value)]
+        if invalid:
+            raise ValueError(f"Invalid CELEX ID(s): {', '.join(invalid)}")
+        return normalized
 
     @model_validator(mode="after")
     def at_least_one_input(self):
@@ -30,7 +45,7 @@ class FixedMode(BaseModel):
         return self
 
 
-class DescriptiveMode(BaseModel):
+class DescriptiveMode(StrictModel):
     mode: Literal["descriptive"] = "descriptive"
     # No hardcoded Literal — any document type string is accepted
     document_types: list[str]
@@ -57,7 +72,7 @@ class DescriptiveMode(BaseModel):
 DataConfig = Annotated[Union[FixedMode, DescriptiveMode], Field(discriminator="mode")]
 
 
-class TextExtraction(BaseModel):
+class TextExtraction(StrictModel):
     include_recitals: bool = True
     include_articles: bool = True
     include_annexes: bool = True
@@ -66,17 +81,18 @@ class TextExtraction(BaseModel):
     article_granularity: Literal["article", "paragraph", "point"] = "article"
 
 
-class Translation(BaseModel):
+class Translation(StrictModel):
     translate_full_text: bool = True
     translate_text_units: bool = True
     max_full_text_chars: int = Field(
         default=100_000,
+        ge=0,
         description="Skip full_text translation for documents longer than this. "
         "Set to 0 to disable the limit.",
     )
 
 
-class Processing(BaseModel):
+class Processing(StrictModel):
     automated_mode: bool = False
     text_extraction: TextExtraction = Field(default_factory=TextExtraction)
     translation: Translation = Field(default_factory=Translation)
@@ -88,12 +104,18 @@ class Processing(BaseModel):
     max_workers: int = Field(default=4, ge=1, le=16)
 
 
-class Output(BaseModel):
-    formats: list[Literal["parquet", "csv"]] = ["parquet"]
+def _default_formats() -> list[Literal["parquet", "csv"]]:
+    return ["parquet"]
+
+
+class Output(StrictModel):
+    formats: list[Literal["parquet", "csv"]] = Field(
+        default_factory=_default_formats, min_length=1,
+    )
     output_directory: str = "./output"
 
 
-class Config(BaseModel):
+class Config(StrictModel):
     metadata: Metadata = Field(default_factory=Metadata)
     data: DataConfig
     processing: Processing = Field(default_factory=Processing)

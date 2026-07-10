@@ -46,3 +46,42 @@ def test_descriptive_mode_requires_dates_order():
                 "end_date": "2020-01-01",
             },
         })
+
+
+def test_unknown_config_keys_are_rejected():
+    with pytest.raises(Exception):
+        Config.model_validate({
+            "data": {"mode": "fixed", "celex_ids": ["32016R0679"]},
+            "processing": {"translatoin": {"max_full_text_chars": 10}},
+        })
+
+
+def test_translation_limit_must_be_nonnegative():
+    with pytest.raises(Exception):
+        Config.model_validate({
+            "data": {"mode": "fixed", "celex_ids": ["32016R0679"]},
+            "processing": {"translation": {"max_full_text_chars": -1}},
+        })
+
+
+def test_fixed_mode_normalizes_and_validates_celex_ids():
+    config = Config.model_validate({
+        "data": {
+            "mode": "fixed",
+            "celex_ids": [
+                " 32016r0679 ",
+                "52001dc0775(02)",
+                "02016r0679-20210101",
+                "12012e/txt",
+            ],
+        },
+    })
+    assert config.data.celex_ids == [
+        "32016R0679", "52001DC0775(02)", "02016R0679-20210101",
+        "12012E/TXT",
+    ]
+
+    with pytest.raises(Exception):
+        Config.model_validate({
+            "data": {"mode": "fixed", "celex_ids": ["not-a-celex"]},
+        })
