@@ -456,6 +456,11 @@ class DuckDBStore:
 
     def start_run(self, config: dict) -> str:
         """Record the validated configuration and runtime versions for a run."""
+        self.conn.execute(
+            """UPDATE dataset_runs
+               SET status = 'interrupted', completed_at = current_timestamp
+               WHERE status = 'running'"""
+        )
         config_json = json.dumps(config, sort_keys=True, separators=(",", ":"))
         dependencies = {}
         for package in (

@@ -787,3 +787,30 @@ def test_pymupdf_fallback_exposes_text_for_translation(monkeypatch, tmp_path):
         str(pdf_path), "TEST", out_metadata=metadata,
     )
     assert metadata["markdown"] == "Article 1\nOperative text."
+
+
+def test_docling_timeout_uses_managed_fallback(monkeypatch):
+    import eurlex_builder.extractors.pdf as pdf_module
+    from eurlex_builder.extractors.pdf import PdfExtractor
+
+    class TimeoutResult:
+        def has_timeout_errors(self):
+            return True
+
+    class Converter:
+        def convert(self, path):
+            return TimeoutResult()
+
+    fallback_calls = []
+
+    def fallback(path, celex_id, **kwargs):
+        fallback_calls.append((path, celex_id))
+        return [{"type": "body", "text": "fallback"}]
+
+    monkeypatch.setattr(pdf_module, "_get_converter", lambda: Converter())
+    monkeypatch.setattr(PdfExtractor, "_pymupdf_fallback", staticmethod(fallback))
+
+    units = PdfExtractor().extract("TEST", b"%PDF-fake")
+
+    assert units == [{"type": "body", "text": "fallback"}]
+    assert len(fallback_calls) == 1

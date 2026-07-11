@@ -9,7 +9,6 @@ import logging
 import re
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 from eurlex_builder.extractors.splitter import split_article
@@ -30,8 +29,17 @@ def _get_converter():
     if _converter is None:
         with _converter_lock:
             if _converter is None:
-                from docling.document_converter import DocumentConverter
-                _converter = DocumentConverter()
+                from docling.datamodel.base_models import InputFormat
+                from docling.datamodel.pipeline_options import PdfPipelineOptions
+                from docling.document_converter import (
+                    DocumentConverter,
+                    PdfFormatOption,
+                )
+
+                options = PdfPipelineOptions(document_timeout=_PDF_TIMEOUT)
+                _converter = DocumentConverter(format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=options),
+                })
                 logger.debug("Docling DocumentConverter initialized")
     return _converter
 
@@ -88,27 +96,12 @@ class PdfExtractor:
 
         try:
             converter = _get_converter()
-            # Run conversion with a timeout to avoid hanging on problematic PDFs.
-            # Avoid returning from inside the `with` block — its __exit__ calls
-            # shutdown(wait=True), which would block until Docling finishes and
-            # defeat the timeout.
-            timed_out = False
-            pool = ThreadPoolExecutor(max_workers=1)
-            future = pool.submit(converter.convert, tmp_path)
-            try:
-                result = future.result(timeout=_PDF_TIMEOUT)
-            except FuturesTimeoutError:
+            result = converter.convert(tmp_path)
+            if result.has_timeout_errors():
                 logger.error(
                     "Docling conversion timed out after %ds for %s",
                     _PDF_TIMEOUT, celex_id,
                 )
-                future.cancel()
-                pool.shutdown(wait=False, cancel_futures=True)
-                timed_out = True
-            else:
-                pool.shutdown(wait=False)
-
-            if timed_out:
                 return self._pymupdf_fallback(
                     tmp_path, celex_id,
                     include_recitals=include_recitals,
@@ -170,7 +163,6 @@ class PdfExtractor:
 
         logger.info("Extracted %d text units from PDF for %s", len(units), celex_id)
         return units
-
 
     @staticmethod
     def _pymupdf_fallback(

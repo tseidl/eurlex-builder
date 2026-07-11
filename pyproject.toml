@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pdf = [
-    "docling>=2.70",
+    "docling>=2.107,<3",
     "onnxruntime>=1.24.2,<2",
     "pymupdf>=1.24",
 ]

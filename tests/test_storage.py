@@ -167,6 +167,17 @@ def test_run_manifest_hash_is_deterministic(store):
     assert source_dirty is None or isinstance(source_dirty, bool)
 
 
+def test_start_run_marks_stale_running_manifest_interrupted(store):
+    previous = store.start_run({"run": "previous"})
+    current = store.start_run({"run": "current"})
+
+    rows = dict(store.conn.execute(
+        "SELECT run_id, status FROM dataset_runs WHERE run_id IN (?, ?)",
+        [previous, current],
+    ).fetchall())
+    assert rows == {previous: "interrupted", current: "running"}
+
+
 def test_store_reopen_migrates_run_source_columns(tmp_path):
     from eurlex_builder.storage.duckdb import DuckDBStore
 
