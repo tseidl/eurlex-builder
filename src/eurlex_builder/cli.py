@@ -39,6 +39,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Clear selected checkpoints and re-process those documents.",
     )
     run_parser.add_argument("--retry-failed", action="store_true", help="Re-attempt previously failed documents.")
+    run_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        help="Process at most this many remaining documents (for resumable canaries).",
+    )
 
     # status subcommand
     status_parser = sub.add_parser("status", help="Show pipeline checkpoint status.")
@@ -85,7 +90,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        _run(args.config, resume=not args.fresh, retry_failed=args.retry_failed)
+        if args.fresh and args.limit:
+            run_parser.error("--limit cannot be combined with --fresh")
+        _run(
+            args.config,
+            resume=not args.fresh,
+            retry_failed=args.retry_failed,
+            limit=args.limit,
+        )
     elif args.command == "status":
         _status(args.db)
     elif args.command == "translate":
@@ -116,11 +128,17 @@ def _require_db(db_path: str) -> None:
         sys.exit(f"Error: database file not found: {db_path}")
 
 
-def _run(config_path: str, *, resume: bool = False, retry_failed: bool = False) -> None:
+def _run(
+    config_path: str,
+    *,
+    resume: bool = False,
+    retry_failed: bool = False,
+    limit: int | None = None,
+) -> None:
     from eurlex_builder.pipeline import Pipeline
 
     pipeline = Pipeline.from_config_file(config_path)
-    pipeline.run(resume=resume, retry_failed=retry_failed)
+    pipeline.run(resume=resume, retry_failed=retry_failed, limit=limit)
 
 
 def _translate(

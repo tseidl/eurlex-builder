@@ -125,6 +125,11 @@ def _validate_connection(conn) -> list[dict[str, object]]:
                  AND t.text_translated IS NULL""",
         ),
         (
+            "error", "pending_pdf_repair",
+            """SELECT count(*) FROM works
+               WHERE content_source LIKE 'repair_pending__cellar_pdf%'""",
+        ),
+        (
             "warning", "works_without_content",
             "SELECT count(*) FROM works WHERE full_text IS NULL OR full_text = ''",
         ),

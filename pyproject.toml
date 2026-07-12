@@ -27,6 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pdf = [
+    # Worker protocol and complete-result validation are audited against 2.107.
     "docling>=2.107,<3",
     "onnxruntime>=1.24.2,<2",
     "pymupdf>=1.24",

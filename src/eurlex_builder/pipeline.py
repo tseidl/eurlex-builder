@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from tqdm import tqdm
 
 from eurlex_builder.config import Config, DescriptiveMode, FixedMode, load_config
-from eurlex_builder.errors import TransientSourceError
+from eurlex_builder.errors import DoclingStartupError, TransientSourceError
 from eurlex_builder.protocols import Checkpoint, DataSource, Store, TextExtractor
 from eurlex_builder.utils import (
     is_consolidated_celex, convert_consolidated_to_original,
@@ -154,14 +154,34 @@ class Pipeline:
             checkpoint=store,  # DuckDBStore implements both Store and Checkpoint
         )
 
-    def run(self, *, resume: bool = False, retry_failed: bool = False) -> None:
+    def run(
+        self,
+        *,
+        resume: bool = False,
+        retry_failed: bool = False,
+        limit: int | None = None,
+    ) -> None:
         """Run the pipeline."""
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be at least 1")
+        if limit is not None and not resume:
+            raise ValueError("limit cannot be combined with a fresh run")
+
+        from eurlex_builder.extractors.pdf import enable_docling_workers
+
+        enable_docling_workers()
         self._setup_logging()
         run_id: str | None = None
         try:
-            run_id = self.store.start_run(self.config.model_dump(mode="json"))
+            manifest_config = self.config.model_dump(mode="json")
+            if limit is not None:
+                manifest_config["_run_options"] = {"limit": limit}
+            run_id = self.store.start_run(manifest_config)
             self._run_impl(
-                run_id=run_id, resume=resume, retry_failed=retry_failed,
+                run_id=run_id,
+                resume=resume,
+                retry_failed=retry_failed,
+                limit=limit,
             )
         except BaseException:
             if run_id is not None:
@@ -171,11 +191,19 @@ class Pipeline:
                     logger.exception("Could not mark run %s as failed", run_id)
             raise
         finally:
+            from eurlex_builder.extractors.pdf import close_all_docling_workers
+
+            close_all_docling_workers(force=True)
             if hasattr(self.store, "close"):
                 self.store.close()
 
     def _run_impl(
-        self, *, run_id: str, resume: bool, retry_failed: bool,
+        self,
+        *,
+        run_id: str,
+        resume: bool,
+        retry_failed: bool,
+        limit: int | None = None,
     ) -> None:
         logger.info(f"eurlex-builder v0.1.0 — {self.config.metadata.project_name}")
 
@@ -199,12 +227,30 @@ class Pipeline:
             celex_ids = [celex_id for celex_id in celex_ids if celex_id not in already_done]
             logger.info(f"Resuming — {len(celex_ids)} remaining after skipping processed.")
 
-        if not celex_ids:
-            logger.info("Nothing to process.")
-        elif self.config.processing.parallel and len(celex_ids) > 1:
-            self._run_parallel(celex_ids)
+        if limit is not None and len(celex_ids) > limit:
+            logger.info(
+                "Canary limit: processing %d of %d remaining documents.",
+                limit, len(celex_ids),
+            )
+            celex_ids = celex_ids[:limit]
+
+        try:
+            if not celex_ids:
+                logger.info("Nothing to process.")
+            elif self.config.processing.parallel and len(celex_ids) > 1:
+                self._run_parallel(celex_ids)
+            else:
+                self._run_sequential(celex_ids)
+        except BaseException:
+            from eurlex_builder.extractors.pdf import close_all_docling_workers
+
+            close_all_docling_workers(force=True)
+            raise
         else:
-            self._run_sequential(celex_ids)
+            from eurlex_builder.extractors.pdf import close_all_docling_workers
+
+            # Release Docling model memory before optional translation starts.
+            close_all_docling_workers()
 
         try:
             from eurlex_builder.translate import translate_database
@@ -252,6 +298,11 @@ class Pipeline:
             try:
                 self._process_one(celex_id)
                 self.checkpoint.mark_processed(celex_id)
+            except DoclingStartupError as exc:
+                if exc.fatal:
+                    raise
+                logger.error("Failed to process %s: %s", celex_id, exc)
+                self.checkpoint.mark_failed(celex_id, str(exc))
             except Exception as e:
                 logger.error(f"Failed to process {celex_id}: {e}")
                 self.checkpoint.mark_failed(celex_id, str(e))
@@ -284,28 +335,56 @@ class Pipeline:
             """Worker: delegates to the shared extraction core."""
             return self._fetch_and_extract(celex_id, _get_thread_source())
 
-        # Submit all work, then write results as they complete.
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(fetch_and_parse, cid): cid for cid in celex_ids
-            }
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        celex_iter = iter(celex_ids)
+        futures: dict[Future[dict], str] = {}
+
+        def submit_next() -> bool:
+            try:
+                celex_id = next(celex_iter)
+            except StopIteration:
+                return False
+            futures[pool.submit(fetch_and_parse, celex_id)] = celex_id
+            return True
+
+        try:
+            for _ in range(min(len(celex_ids), max_workers * 2)):
+                submit_next()
 
             with tqdm(total=len(celex_ids), desc="Processing documents") as pbar:
-                for future in as_completed(futures):
-                    celex_id = futures[future]
-                    try:
-                        result = future.result()
-                        # Sequential DB writes in main thread. save_text_units
-                        # runs even with zero units so a re-extraction that now
-                        # yields nothing clears the previous rows — but only
-                        # when content was actually fetched: a transient fetch
-                        # failure must not wipe previously extracted units.
-                        self._persist_result(celex_id, result)
-                        self.checkpoint.mark_processed(celex_id)
-                    except Exception as e:
-                        logger.error(f"Failed to process {celex_id}: {e}")
-                        self.checkpoint.mark_failed(celex_id, str(e))
-                    pbar.update(1)
+                while futures:
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        celex_id = futures.pop(future)
+                        try:
+                            result = future.result()
+                            # DB writes stay in the main thread. Empty units
+                            # clear stale extraction rows only after a fetch.
+                            self._persist_result(celex_id, result)
+                            self.checkpoint.mark_processed(celex_id)
+                        except DoclingStartupError as exc:
+                            if exc.fatal:
+                                raise
+                            logger.error("Failed to process %s: %s", celex_id, exc)
+                            self.checkpoint.mark_failed(celex_id, str(exc))
+                        except Exception as e:
+                            logger.error(f"Failed to process {celex_id}: {e}")
+                            self.checkpoint.mark_failed(celex_id, str(e))
+                        pbar.update(1)
+                        submit_next()
+        except BaseException:
+            from eurlex_builder.extractors.pdf import close_all_docling_workers
+
+            close_all_docling_workers(force=True)
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+        finally:
+            for source in _thread_sources.values():
+                source.session.close()
 
     # ------------------------------------------------------------------
     # Shared logic
@@ -438,14 +517,16 @@ class Pipeline:
         # Structural extraction for R/L/D.
         if raw_content and doc_type in STRUCTURAL_DOC_TYPES:
             language = fetch_result[2] if fetch_result and len(fetch_result) >= 3 else "eng"
+            content_type = fetch_result[1] if fetch_result else ""
             extract_meta: dict = {}
             units = self._extract_units(
                 celex_id, raw_content, text_cfg, language=language,
                 out_metadata=extract_meta,
             )
+            if content_type == "pdf":
+                self._apply_pdf_provenance(metadata, extract_meta)
 
             # PDF fallback when HTML extraction is poor.
-            content_type = fetch_result[1] if fetch_result else ""
             if content_type == "html" and self._should_retry_with_pdf(
                 units,
                 include_recitals=(
@@ -470,10 +551,19 @@ class Pipeline:
                 if pdf_result is not None:
                     pdf_raw, _, pdf_lang = pdf_result
                     pdf_meta: dict = {}
-                    pdf_units = self._extract_units(
-                        celex_id, pdf_raw, text_cfg, language=pdf_lang,
-                        out_metadata=pdf_meta,
-                    )
+                    try:
+                        pdf_units = self._extract_units(
+                            celex_id, pdf_raw, text_cfg, language=pdf_lang,
+                            out_metadata=pdf_meta,
+                        )
+                    except DoclingStartupError as exc:
+                        logger.warning(
+                            "Optional PDF quality extraction failed for %s: %s; "
+                            "keeping HTML extraction",
+                            celex_id,
+                            exc,
+                        )
+                        pdf_units = []
                     if pdf_units and len(pdf_units) > len(units):
                         logger.info(
                             "PDF fallback for %s: %d units (was %d from HTML)",
@@ -483,6 +573,7 @@ class Pipeline:
                         language = pdf_lang
                         extract_meta = pdf_meta
                         metadata["content_source"] = f"cellar_pdf_{pdf_lang}_fallback"
+                        self._apply_pdf_provenance(metadata, pdf_meta)
                         metadata["language"] = pdf_lang
                         # Keep full_text consistent with the adopted language —
                         # otherwise the translation phase would run a
@@ -561,7 +652,12 @@ class Pipeline:
         # Paragraph extraction for communications, proposals, and staff
         # working documents — all share the COM prose templates.
         elif raw_content and doc_type in COM_STYLE_DOC_TYPES:
-            units = self._extract_com_units(celex_id, raw_content)
+            extract_meta = {}
+            units = self._extract_com_units(
+                celex_id, raw_content, out_metadata=extract_meta,
+            )
+            if fetch_result and fetch_result[1] == "pdf":
+                self._apply_pdf_provenance(metadata, extract_meta)
 
         # Strip boilerplate from last article, drop empty units.
         if text_cfg.strip_boilerplate and units:
@@ -646,7 +742,21 @@ class Pipeline:
             return True
         return False
 
-    def _extract_com_units(self, celex_id: str, raw_content: bytes) -> list[dict]:
+    @staticmethod
+    def _apply_pdf_provenance(metadata: dict, extraction_metadata: dict) -> None:
+        if extraction_metadata.get("pdf_backend") != "pymupdf":
+            return
+        reason = extraction_metadata.get("pdf_fallback_reason") or "conversion"
+        content_source = metadata.get("content_source") or "cellar_pdf_unknown"
+        metadata["content_source"] = f"{content_source}__pymupdf_{reason}"
+
+    def _extract_com_units(
+        self,
+        celex_id: str,
+        raw_content: bytes,
+        *,
+        out_metadata: dict | None = None,
+    ) -> list[dict]:
         """Extract paragraph-level units from a communication document."""
         from eurlex_builder.extractors.html import HtmlExtractor
         extractor = HtmlExtractor()
@@ -657,53 +767,27 @@ class Pipeline:
         from eurlex_builder.extractors.pdf import PdfExtractor
         pdf_extractor = PdfExtractor()
         if pdf_extractor.can_handle(raw_content):
-            return self._extract_com_from_pdf(celex_id, raw_content)
+            return self._extract_com_from_pdf(
+                celex_id, raw_content, out_metadata=out_metadata,
+            )
 
         logger.warning("No HTML or PDF content for COM %s — paragraph extraction skipped", celex_id)
         return []
 
-    def _extract_com_from_pdf(self, celex_id: str, raw_content: bytes) -> list[dict]:
-        """Extract COM paragraphs from PDF via Docling (with pymupdf fallback)."""
-        import tempfile
-        from pathlib import Path
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-        from eurlex_builder.extractors.pdf import _get_converter, _PDF_TIMEOUT, extract_pdf_full_text
+    def _extract_com_from_pdf(
+        self,
+        celex_id: str,
+        raw_content: bytes,
+        *,
+        out_metadata: dict | None = None,
+    ) -> list[dict]:
+        """Extract COM paragraphs through the shared isolated PDF path."""
+        from eurlex_builder.extractors.pdf import extract_pdf_markdown
         from eurlex_builder.extractors.html import extract_com_from_text
 
-        # Skip Docling for very large PDFs to avoid segfaults in native code.
-        docling_size_limit = 50 * 1024 * 1024
-        text = None
-
-        if len(raw_content) > docling_size_limit:
-            logger.info(
-                "PDF for COM %s is %.0f MB — skipping Docling, using pymupdf",
-                celex_id, len(raw_content) / 1024 / 1024,
-            )
-        else:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-                f.write(raw_content)
-                tmp_path = f.name
-
-            try:
-                converter = _get_converter()
-                pool = ThreadPoolExecutor(max_workers=1)
-                future = pool.submit(converter.convert, tmp_path)
-                try:
-                    result = future.result(timeout=_PDF_TIMEOUT)
-                    text = result.document.export_to_markdown()
-                except FuturesTimeoutError:
-                    logger.warning("Docling timed out for COM %s, falling back to pymupdf", celex_id)
-                    future.cancel()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                else:
-                    pool.shutdown(wait=False)
-            except Exception as exc:
-                logger.warning("Docling failed for COM %s: %s, falling back to pymupdf", celex_id, exc)
-            finally:
-                Path(tmp_path).unlink(missing_ok=True)
-
-        if not text:
-            text = extract_pdf_full_text(raw_content)
+        text = extract_pdf_markdown(
+            celex_id, raw_content, out_metadata=out_metadata,
+        )
 
         if not text:
             logger.warning("PDF text extraction returned nothing for COM %s", celex_id)
@@ -782,13 +866,22 @@ class Pipeline:
         raw, _, _ = fetch_result
         for extractor in self.extractors:
             if extractor.can_handle(raw):
-                extracted = extractor.extract(
-                    consolidated_celex,
-                    raw,
-                    include_recitals=True,
-                    include_articles=False,
-                    include_annexes=False,
-                )
+                try:
+                    extracted = extractor.extract(
+                        consolidated_celex,
+                        raw,
+                        include_recitals=True,
+                        include_articles=False,
+                        include_annexes=False,
+                    )
+                except DoclingStartupError as exc:
+                    logger.warning(
+                        "Optional original-act recital extraction failed for %s: "
+                        "%s; keeping consolidated extraction",
+                        original_celex,
+                        exc,
+                    )
+                    return []
                 # The extractors fall back to a whole-document "body" unit when
                 # they find no structure — that must not leak into the merge.
                 return [u for u in extracted if u.get("type") == "recital"]

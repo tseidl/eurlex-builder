@@ -252,6 +252,102 @@ def test_pdf_retry_honors_requested_structures():
     )
 
 
+def test_com_pdf_uses_shared_isolated_extraction(monkeypatch):
+    import eurlex_builder.extractors.pdf as pdf_module
+
+    metadata = {}
+
+    def extract_markdown(celex_id, raw_content, *, out_metadata=None):
+        out_metadata.update({"pdf_backend": "docling", "markdown": "Section\nText"})
+        return "1. Introduction\n\nSubstantive communication text."
+
+    monkeypatch.setattr(pdf_module, "extract_pdf_markdown", extract_markdown)
+    units = _pipeline()._extract_com_from_pdf(
+        "52020DC0001", b"%PDF-fake", out_metadata=metadata,
+    )
+    assert units
+    assert metadata["pdf_backend"] == "docling"
+
+
+def test_pdf_fallback_provenance_is_queryable():
+    metadata = {"content_source": "cellar_pdf_eng"}
+    Pipeline._apply_pdf_provenance(metadata, {
+        "pdf_backend": "pymupdf",
+        "pdf_fallback_reason": "timeout",
+    })
+    assert metadata["content_source"] == "cellar_pdf_eng__pymupdf_timeout"
+
+
+def test_pdf_quality_startup_failure_keeps_primary_html(monkeypatch):
+    from eurlex_builder.config import Config
+    from eurlex_builder.errors import DoclingStartupError
+
+    class Source:
+        def fetch_metadata(self, celex_id):
+            return {
+                "celex_id": celex_id,
+                "title": "Test",
+                "date_adopted": None,
+                "document_type": "regulation",
+                "language": None,
+                "full_text_html": None,
+            }
+
+        def fetch_content(self, celex_id):
+            return b"<html><body>Primary HTML</body></html>", "html", "eng"
+
+        def fetch_pdf(self, celex_id):
+            return b"%PDF-fake", "pdf", "eng"
+
+        def fetch_relations(self, celex_id):
+            return []
+
+        def fetch_eurovoc(self, celex_id):
+            return []
+
+    config = Config.model_validate({
+        "data": {"mode": "fixed", "celex_ids": ["32020R0001"]},
+    })
+    pipeline = Pipeline(config, None, [HtmlExtractor()], None, None)
+    html_units = [{"type": "article", "number": "1", "text": "Primary HTML"}]
+    extraction_calls = 0
+
+    def extract_units(*args, **kwargs):
+        nonlocal extraction_calls
+        extraction_calls += 1
+        if extraction_calls == 1:
+            return html_units
+        raise DoclingStartupError("model unavailable", fatal=True)
+
+    monkeypatch.setattr(pipeline, "_extract_units", extract_units)
+    monkeypatch.setattr(pipeline, "_should_retry_with_pdf", lambda *a, **kw: True)
+
+    result = pipeline._fetch_and_extract("32020R0001", Source())
+
+    assert result["units"] == html_units
+    assert result["metadata"]["content_source"] == "cellar_html_eng"
+
+
+def test_fatal_docling_startup_stops_sequential_run(monkeypatch):
+    import pytest
+    from unittest.mock import Mock
+
+    from eurlex_builder.errors import DoclingStartupError
+
+    pipeline = _pipeline()
+    pipeline.checkpoint = Mock()
+    monkeypatch.setattr(
+        pipeline,
+        "_process_one",
+        Mock(side_effect=DoclingStartupError("model unavailable", fatal=True)),
+    )
+
+    with pytest.raises(DoclingStartupError):
+        pipeline._run_sequential(["32020R0001"])
+
+    pipeline.checkpoint.mark_failed.assert_not_called()
+
+
 def test_run_manifest_is_marked_failed_on_discovery_error(store, monkeypatch):
     import duckdb
     from eurlex_builder.config import Config
@@ -321,6 +417,166 @@ def test_fresh_run_resets_only_selected_checkpoints(monkeypatch, tmp_path):
 
     checkpoint.reset_ids.assert_called_once_with(["32020R0001"])
     store.get_processed_ids.assert_not_called()
+
+
+def test_resume_limit_processes_bounded_subset_without_narrowing_selection(
+    monkeypatch, tmp_path,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from eurlex_builder.config import Config
+
+    ids = ["32020R0001", "32020R0002", "32020R0003"]
+    config = Config.model_validate({
+        "data": {"mode": "fixed", "celex_ids": ids},
+        "processing": {
+            "translation": {
+                "translate_full_text": False,
+                "translate_text_units": False,
+            },
+        },
+        "output": {"output_directory": str(tmp_path)},
+    })
+    store = Mock()
+    store.get_processed_ids.return_value = set()
+    checkpoint = Mock()
+    checkpoint.get_summary.return_value = {
+        "processed": 2, "failed": 0, "failed_details": {},
+    }
+    processed = []
+    pipeline = Pipeline(config, None, [], store, checkpoint)
+    monkeypatch.setattr(pipeline, "_run_sequential", processed.extend)
+    monkeypatch.setattr(pipeline, "_report_missing_content", lambda: None)
+    monkeypatch.setattr(pipeline, "_report_extraction_stats", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "eurlex_builder.translate",
+        SimpleNamespace(translate_database=lambda *args, **kwargs: None),
+    )
+
+    pipeline._run_impl(
+        run_id="run-id", resume=True, retry_failed=False, limit=2,
+    )
+
+    assert processed == ids[:2]
+    assert pipeline._selected_ids == set(ids)
+
+
+def test_programmatic_limit_rejects_fresh_run():
+    import pytest
+    from unittest.mock import Mock
+
+    from eurlex_builder.config import Config
+
+    config = Config.model_validate({
+        "data": {"mode": "fixed", "celex_ids": ["32020R0001"]},
+    })
+    pipeline = Pipeline(config, None, [], Mock(), Mock())
+
+    with pytest.raises(ValueError, match="fresh run"):
+        pipeline.run(resume=False, limit=1)
+
+
+def test_parallel_interrupt_does_not_persist_or_checkpoint(monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import eurlex_builder.pipeline as pipeline_module
+    import eurlex_builder.sources.cellar as cellar_module
+    from eurlex_builder.config import Config
+    from eurlex_builder.extractors.pdf import enable_docling_workers
+
+    class Source:
+        def __init__(self):
+            self.session = SimpleNamespace(close=lambda: None)
+
+    config = Config.model_validate({
+        "data": {
+            "mode": "fixed",
+            "celex_ids": ["32020R0001", "32020R0002"],
+        },
+        "processing": {"parallel": True, "max_workers": 2},
+    })
+    checkpoint = Mock()
+    pipeline = Pipeline(config, None, [], Mock(), checkpoint)
+    pipeline._fetch_and_extract = Mock(return_value={})
+    pipeline._persist_result = Mock()
+    monkeypatch.setattr(cellar_module, "CellarSource", Source)
+    monkeypatch.setattr(
+        pipeline_module,
+        "wait",
+        lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    enable_docling_workers()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            pipeline._run_parallel(["32020R0001", "32020R0002"])
+    finally:
+        enable_docling_workers()
+
+    pipeline._persist_result.assert_not_called()
+    checkpoint.mark_processed.assert_not_called()
+
+
+def test_parallel_scheduler_bounds_in_flight_futures(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import eurlex_builder.pipeline as pipeline_module
+    import eurlex_builder.sources.cellar as cellar_module
+    from eurlex_builder.config import Config
+
+    class Source:
+        def __init__(self):
+            self.session = SimpleNamespace(close=lambda: None)
+
+    class ImmediateFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+        def cancel(self):
+            return False
+
+    class ImmediatePool:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+        def submit(self, function, celex_id):
+            return ImmediateFuture(function(celex_id))
+
+        def shutdown(self, **kwargs):
+            return None
+
+    observed_sizes = []
+
+    def complete_current(futures, **kwargs):
+        observed_sizes.append(len(futures))
+        return set(futures), set()
+
+    ids = [f"32020R{number:04d}" for number in range(20)]
+    config = Config.model_validate({
+        "data": {"mode": "fixed", "celex_ids": ids},
+        "processing": {"parallel": True, "max_workers": 3},
+    })
+    checkpoint = Mock()
+    pipeline = Pipeline(config, None, [], Mock(), checkpoint)
+    pipeline._fetch_and_extract = Mock(return_value={})
+    pipeline._persist_result = Mock()
+    monkeypatch.setattr(cellar_module, "CellarSource", Source)
+    monkeypatch.setattr(pipeline_module, "ThreadPoolExecutor", ImmediatePool)
+    monkeypatch.setattr(pipeline_module, "wait", complete_current)
+
+    pipeline._run_parallel(ids)
+
+    assert max(observed_sizes) <= 2 * config.processing.max_workers
+    assert pipeline._persist_result.call_count == len(ids)
+    assert checkpoint.mark_processed.call_count == len(ids)
 
 
 def test_empty_missing_content_report_removes_stale_files(tmp_path):

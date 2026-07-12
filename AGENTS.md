@@ -10,7 +10,8 @@ Configurable Python pipeline that builds structured datasets from EU legislative
   - `protocols.py` — DataSource, TextExtractor, Store, Checkpoint protocols
   - `sources/cellar.py` — SPARQL + REST API client for EUR-Lex/Cellar
   - `extractors/html.py` — 6 HTML era extractors + COM paragraph extraction
-  - `extractors/pdf.py` — Docling + pymupdf PDF extraction
+  - `extractors/pdf.py` — parent-side isolated Docling worker lifecycle + pymupdf fallback
+  - `extractors/docling_process.py` — persistent standalone Docling subprocess
   - `extractors/splitter.py` — sub-article splitting (paragraph/point granularity)
   - `storage/duckdb.py` — DuckDB store + checkpoint implementation
   - `storage/export.py` — Polars-based Parquet/CSV export
@@ -38,7 +39,7 @@ Configurable Python pipeline that builds structured datasets from EU legislative
 ## CLI
 
 ```bash
-eurlex-builder run config.yaml [--fresh] [--retry-failed]
+eurlex-builder run config.yaml [--fresh] [--retry-failed] [--limit N]
 eurlex-builder translate <db> [--no-full-text] [--no-text-units]
 eurlex-builder enrich <db> [--select metadata relations eurovoc] [--parallel]
 eurlex-builder status <db>
@@ -48,7 +49,9 @@ eurlex-builder validate <db>
 ## Key design decisions
 
 - Six HTML extraction eras detected at runtime (standard OJ, manual CSS, class-based, text-only, consolidated-norm, classless fallback)
-- PDF fallback via Docling with pymupdf as last resort; 50MB size guard
+- Each pipeline thread reuses one standalone Docling subprocess; a hard timeout kills the process group and the next PDF starts a clean worker
+- Only complete Docling conversions are accepted; partial, failed, timed-out, crashed, and oversized conversions use pymupdf and receive a queryable `content_source` suffix
+- The 50MB Docling size guard, PDF/COM conversion, and fallback provenance share one extraction path
 - Translate-before-extract fallback for non-English legislative PDFs where requested structures are missing; adopted only when requested structure counts improve without regressions
 - Sub-article splitter operates on `body_parts: list[str]` from extractors, not raw HTML
 - Point markers are validated against the drafting sequence ((a), (aa), (b), …); roman sub-points stay inside their parent point
@@ -56,6 +59,7 @@ eurlex-builder validate <db>
 - Quoted replacement law in amending acts (`: '…'`) is never split; close quotes only count when followed by punctuation, so apostrophes don't close a region
 - Checkpoint in DuckDB `_checkpoint` table makes the pipeline restart-safe
 - `--fresh` clears checkpoints only for the selected documents; resume an interrupted fresh rebuild without passing `--fresh` again
+- `--limit N` bounds a resumable canary and cannot be combined with `--fresh`
 - Relations cached from metadata SPARQL to avoid duplicate queries
 - Stable text-unit keys combine CELEX and structural coordinates; `unit_order` preserves document order
 - Run manifests store the validated config hash and dependency versions in DuckDB

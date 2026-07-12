@@ -17,6 +17,9 @@ from eurlex_builder.extractors.pdf import _parse_legislative_markdown
 from eurlex_builder.pipeline import _should_run_translate_fallback
 
 
+_STUB_WORKER = "tests.docling_worker_stub"
+
+
 # ---------------------------------------------------------------------------
 # _INLINE_REF_START_RE — narrow inline-cross-reference filter
 # ---------------------------------------------------------------------------
@@ -758,7 +761,8 @@ def test_html_body_fallback_respects_disabled_articles():
 def test_pymupdf_fallback_exposes_text_for_translation(monkeypatch, tmp_path):
     import sys
     from types import SimpleNamespace
-    from eurlex_builder.extractors.pdf import PdfExtractor
+    import eurlex_builder.extractors.pdf as pdf_module
+    from eurlex_builder.extractors.pdf import PdfExtractor, _DoclingResult
 
     class FakePage:
         def get_text(self):
@@ -780,37 +784,279 @@ def test_pymupdf_fallback_exposes_text_for_translation(monkeypatch, tmp_path):
         "pymupdf",
         SimpleNamespace(open=lambda path: FakeDoc([FakePage()])),
     )
-    pdf_path = tmp_path / "source.pdf"
-    pdf_path.write_bytes(b"%PDF-fake")
-    metadata = {}
-    PdfExtractor._pymupdf_fallback(
-        str(pdf_path), "TEST", out_metadata=metadata,
-    )
-    assert metadata["markdown"] == "Article 1\nOperative text."
-
-
-def test_docling_timeout_uses_managed_fallback(monkeypatch):
-    import eurlex_builder.extractors.pdf as pdf_module
-    from eurlex_builder.extractors.pdf import PdfExtractor
-
-    class TimeoutResult:
-        def has_timeout_errors(self):
-            return True
-
-    class Converter:
+    class TimeoutWorker:
         def convert(self, path):
-            return TimeoutResult()
+            return _DoclingResult(
+                failure_reason="timeout", error="deadline exceeded",
+            )
 
-    fallback_calls = []
+    monkeypatch.setattr(pdf_module, "_get_docling_worker", TimeoutWorker)
+    metadata = {}
+    units = PdfExtractor().extract("TEST", b"%PDF-fake", out_metadata=metadata)
 
-    def fallback(path, celex_id, **kwargs):
-        fallback_calls.append((path, celex_id))
-        return [{"type": "body", "text": "fallback"}]
+    assert metadata["markdown"] == "Article 1\nOperative text."
+    assert metadata["pdf_backend"] == "pymupdf"
+    assert metadata["pdf_fallback_reason"] == "timeout"
+    assert units[0]["type"] == "article"
 
-    monkeypatch.setattr(pdf_module, "_get_converter", lambda: Converter())
-    monkeypatch.setattr(PdfExtractor, "_pymupdf_fallback", staticmethod(fallback))
 
-    units = PdfExtractor().extract("TEST", b"%PDF-fake")
+def test_partial_conversion_result_is_not_success():
+    from types import SimpleNamespace
+    from eurlex_builder.extractors.pdf import _conversion_result_error
 
-    assert units == [{"type": "body", "text": "fallback"}]
-    assert len(fallback_calls) == 1
+    result = SimpleNamespace(
+        status=SimpleNamespace(value="partial_success"),
+        errors=[SimpleNamespace(error_message="page parse failed")],
+    )
+    assert _conversion_result_error(result) == "page parse failed"
+
+
+def test_persistent_worker_round_trip_and_reuse(tmp_path):
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"SUCCESS")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=5,
+    )
+    try:
+        first = worker.convert(str(source))
+        first_pid = worker._process.pid
+        second = worker.convert(str(source))
+        assert first.markdown == "Article 1\nStub text"
+        assert second.markdown == first.markdown
+        assert worker._process.pid == first_pid
+    finally:
+        worker.close()
+
+
+def test_persistent_worker_transfers_large_output(tmp_path):
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "large.pdf"
+    source.write_bytes(b"LARGE")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=5,
+    )
+    try:
+        result = worker.convert(str(source))
+        assert result.markdown is not None
+        assert len(result.markdown) == 8 * 1024 * 1024
+    finally:
+        worker.close()
+
+
+def test_persistent_worker_rejects_partial_result(tmp_path):
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "partial.pdf"
+    source.write_bytes(b"PARTIAL")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=5,
+    )
+    try:
+        result = worker.convert(str(source))
+        assert result.markdown is None
+        assert result.failure_reason == "partial"
+        assert result.error == "page failed"
+        assert worker._process is None
+    finally:
+        worker.close()
+
+
+def test_persistent_worker_reports_crash_without_stalling(tmp_path):
+    import time
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "crash.pdf"
+    source.write_bytes(b"CRASH")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=5,
+    )
+    started = time.monotonic()
+    try:
+        result = worker.convert(str(source))
+        assert result.failure_reason == "crash"
+        assert "exitcode=17" in (result.error or "")
+        assert time.monotonic() - started < 5
+        assert worker._process is None
+    finally:
+        worker.close()
+
+
+def test_persistent_worker_reports_startup_error(tmp_path):
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"SUCCESS")
+    worker = _DoclingWorkerClient(
+        worker_module="tests.docling_startup_error_stub",
+        startup_timeout=5,
+        conversion_timeout=5,
+    )
+    try:
+        result = worker.convert(str(source))
+        assert result.failure_reason == "startup"
+        assert "model unavailable" in (result.error or "")
+        assert worker._process is None
+    finally:
+        worker.close()
+
+
+def test_complete_control_pipe_garbage_fails_without_stalling(tmp_path):
+    import time
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "garbage.pdf"
+    source.write_bytes(b"GARBAGE_LINE")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=2,
+    )
+    started = time.monotonic()
+    try:
+        result = worker.convert(str(source))
+        assert result.failure_reason == "crash"
+        assert "invalid Docling worker response" in (result.error or "")
+        assert time.monotonic() - started < 5
+    finally:
+        worker.close()
+
+
+def test_partial_control_pipe_line_obeys_deadline(tmp_path):
+    import time
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "partial-line.pdf"
+    source.write_bytes(b"PARTIAL_LINE")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=0.2,
+    )
+    started = time.monotonic()
+    try:
+        result = worker.convert(str(source))
+        assert result.failure_reason == "timeout"
+        assert time.monotonic() - started < 5
+    finally:
+        worker.close()
+
+
+def test_three_consecutive_startup_failures_open_circuit(monkeypatch):
+    import pytest
+    import eurlex_builder.extractors.pdf as pdf_module
+    from eurlex_builder.errors import DoclingStartupError
+    from eurlex_builder.extractors.pdf import _DoclingResult
+
+    class FailedWorker:
+        def convert(self, path):
+            return _DoclingResult(
+                failure_reason="startup", error="model unavailable",
+            )
+
+    monkeypatch.setattr(pdf_module, "_get_docling_worker", FailedWorker)
+    pdf_module.enable_docling_workers()
+    fatal_flags = []
+    try:
+        for _ in range(3):
+            with pytest.raises(DoclingStartupError) as exc_info:
+                pdf_module.extract_pdf_markdown("TEST", b"%PDF-fake")
+            fatal_flags.append(exc_info.value.fatal)
+    finally:
+        pdf_module.enable_docling_workers()
+
+    assert fatal_flags == [False, False, True]
+
+
+def test_persistent_worker_timeout_reaps_child(tmp_path):
+    import time
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "hang.pdf"
+    source.write_bytes(b"HANG")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=0.2,
+    )
+    started = time.monotonic()
+    try:
+        result = worker.convert(str(source))
+        assert result.failure_reason == "timeout"
+        assert time.monotonic() - started < 5
+        assert worker._process is None
+    finally:
+        worker.close()
+
+
+def test_eight_worker_clients_run_concurrently_without_leaks(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    def convert(index):
+        source = tmp_path / f"source-{index}.pdf"
+        source.write_bytes(b"SUCCESS")
+        worker = _DoclingWorkerClient(
+            worker_module=_STUB_WORKER,
+            startup_timeout=5,
+            conversion_timeout=5,
+        )
+        try:
+            return worker.convert(str(source)).markdown
+        finally:
+            worker.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(convert, range(8)))
+
+    assert results == ["Article 1\nStub text"] * 8
+
+
+def test_close_interrupts_active_worker_without_waiting_for_deadline(tmp_path):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from eurlex_builder.extractors.pdf import _DoclingWorkerClient
+
+    source = tmp_path / "hang-close.pdf"
+    source.write_bytes(b"HANG")
+    worker = _DoclingWorkerClient(
+        worker_module=_STUB_WORKER,
+        startup_timeout=5,
+        conversion_timeout=60,
+    )
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(worker.convert, str(source))
+        deadline = time.monotonic() + 5
+        started_marker = tmp_path / "hang-close.pdf.started"
+        while not started_marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert started_marker.exists()
+        worker.close()
+        result = future.result(timeout=5)
+
+    assert result.failure_reason == "crash"
+    assert time.monotonic() - started < 5
+    assert worker._process is None
+
+
+def test_force_close_blocks_late_worker_creation():
+    import pytest
+    import eurlex_builder.extractors.pdf as pdf_module
+
+    pdf_module.close_all_docling_workers(force=True)
+    try:
+        with pytest.raises(RuntimeError, match="shutting down"):
+            pdf_module._get_docling_worker()
+    finally:
+        pdf_module.enable_docling_workers()

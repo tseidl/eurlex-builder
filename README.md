@@ -296,10 +296,12 @@ Run the pipeline.
 | `config` | YAML config file |
 | `--fresh` | Clear checkpoints for the selected documents and re-process them |
 | `--retry-failed` | Re-attempt previously failed docs |
+| `--limit N` | Process only the first N remaining documents; later runs resume the rest |
 
 The pipeline resumes by default, skipping checkpointed docs. After an
 interrupted `--fresh` rebuild, re-run without `--fresh` to resume the new
 rebuild rather than clearing its completed checkpoints again.
+`--limit` is intended for canary runs and cannot be combined with `--fresh`.
 
 ### `eurlex-builder translate <db>`
 
@@ -362,7 +364,7 @@ Run read-only integrity checks for checkpoint/work consistency, orphaned rows, s
 | `full_text` | VARCHAR | Full document text (translated to English if non-English source) |
 | `full_text_original` | VARCHAR | Original-language text (non-English docs only) |
 | `full_text_html` | VARCHAR | Raw HTML (only if `store_raw_html: true`) |
-| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). `cellar_pdf_<lang>_fallback` when the PDF retry beat poor HTML extraction; suffix `__translated` when the translate-before-extract fallback produced the text units |
+| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). `cellar_pdf_<lang>_fallback` means the PDF retry beat poor HTML extraction. A `__pymupdf_<reason>` suffix identifies degraded PDF extraction after a Docling timeout, partial result, crash, conversion error, oversize guard, or empty result; `__translated` identifies translate-before-extract output |
 | `date_entry_into_force` | DATE | Populated by `enrich` |
 | `date_end_of_validity` | DATE | Populated by `enrich`; `9999-12-31` if still in force |
 | `is_in_force` | BOOLEAN | Populated by `enrich` |
@@ -483,6 +485,11 @@ redownloads source documents and re-runs PDF extraction. This is slower, but it
 ensures every exported row was produced by the same package version and config.
 Run `eurlex-builder validate <db>` after the build and enrichment steps.
 
+For the one-off migration from the pre-isolation PDF extractor, follow
+[PDF isolation migration and repair](docs/pdf-isolation-repair.md). It records
+the affected CELEX IDs, makes incomplete repair state queryable, and prevents a
+later unavailable source response from silently preserving suspect PDF output.
+
 </details>
 
 <details>
@@ -546,7 +553,9 @@ config.yaml (Pydantic-validated)
   ├─ Per-document processing (parallel or sequential):
   │     metadata fetch         — SPARQL: title, date, relations
   │     content fetch           — REST: XHTML / HTML / PDF (six-language fallback)
-  │     text extraction         — lxml: 6 HTML structures + paragraph splitting + PDF/Docling
+  │     text extraction         — lxml: 6 HTML structures + paragraph splitting
+  │                               PDF: persistent isolated Docling workers, with
+  │                               per-document hard timeouts and pymupdf fallback
   │     translate-before-extract — Opus-MT fallback when a non-English legislative
   │                                PDF misses requested structures (English-only
   │                                markers like "Whereas:" wouldn't fire on a French

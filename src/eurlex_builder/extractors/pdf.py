@@ -1,47 +1,547 @@
 """PDF text extractor using Docling for layout-aware document understanding.
 
-Falls back to pymupdf for lightweight text extraction when Docling times out.
+Docling runs in persistent isolated subprocesses so native-library hangs can be
+terminated without leaking resources into the pipeline process. PyMuPDF is the
+bounded fallback for document-specific conversion failures.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
+import os
 import re
+import selectors
+import signal
+import subprocess
+import sys
 import tempfile
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import IO, Literal
 
+from eurlex_builder.errors import DoclingStartupError
 from eurlex_builder.extractors.splitter import split_article
 
 logger = logging.getLogger("eurlex_builder")
 
 # Timeout for a single PDF conversion (seconds).
 _PDF_TIMEOUT = 120
+_WORKER_START_TIMEOUT = 180
+_DOCLING_SIZE_LIMIT = 50 * 1024 * 1024
+_WORKER_JOIN_TIMEOUT = 5
+_CONTROL_MESSAGE_LIMIT = 1024 * 1024
 
-# Lazy-loaded converter to avoid heavy import at module load.
-_converter = None
-_converter_lock = threading.Lock()
+_FailureReason = Literal[
+    "timeout",
+    "partial",
+    "conversion",
+    "crash",
+    "protocol",
+    "startup",
+    "oversize",
+    "empty",
+]
 
 
-def _get_converter():
-    """Lazily initialize the Docling DocumentConverter."""
-    global _converter
-    if _converter is None:
-        with _converter_lock:
-            if _converter is None:
-                from docling.datamodel.base_models import InputFormat
-                from docling.datamodel.pipeline_options import PdfPipelineOptions
-                from docling.document_converter import (
-                    DocumentConverter,
-                    PdfFormatOption,
+@dataclass(frozen=True)
+class _DoclingResult:
+    markdown: str | None = None
+    failure_reason: _FailureReason | None = None
+    error: str | None = None
+
+
+def _conversion_result_error(result) -> str | None:
+    errors = [error.error_message for error in result.errors]
+    status = getattr(result.status, "value", str(result.status))
+    if status == "success" and not errors:
+        return None
+    return "; ".join(errors) or status
+
+
+class _DoclingWorkerClient:
+    """Parent-side lifecycle manager for one persistent Docling process."""
+
+    def __init__(
+        self,
+        *,
+        worker_module: str = "eurlex_builder.extractors.docling_process",
+        startup_timeout: float = _WORKER_START_TIMEOUT,
+        conversion_timeout: float = _PDF_TIMEOUT,
+    ) -> None:
+        self._worker_module = worker_module
+        self._startup_timeout = startup_timeout
+        self._conversion_timeout = conversion_timeout
+        self._process: subprocess.Popen[str] | None = None
+        self._diagnostics_stream: IO[str] | None = None
+        self._diagnostics_path: str | None = None
+        self._request_id = 0
+        self._control_buffer = bytearray()
+        self._lifecycle_lock = threading.RLock()
+        self.closed = False
+
+    def _diagnostic_tail(self) -> str:
+        diagnostics_path = self._diagnostics_path
+        if not diagnostics_path:
+            return ""
+        try:
+            with open(diagnostics_path, "rb") as diagnostics:
+                diagnostics.seek(0, os.SEEK_END)
+                size = diagnostics.tell()
+                diagnostics.seek(max(0, size - 8192))
+                return diagnostics.read().decode("utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+
+    def _clear_diagnostics(self) -> None:
+        with self._lifecycle_lock:
+            diagnostics_stream = self._diagnostics_stream
+            diagnostics_path = self._diagnostics_path
+            if diagnostics_stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    diagnostics_stream.flush()
+            if diagnostics_path:
+                with contextlib.suppress(OSError):
+                    os.truncate(diagnostics_path, 0)
+
+    def _wait_for_message(
+        self,
+        process: subprocess.Popen[str],
+        timeout: float,
+    ) -> list:
+        stdout = process.stdout
+        if stdout is None:
+            raise OSError("Docling worker stdout is unavailable")
+        deadline = time.monotonic() + timeout
+        selector = selectors.DefaultSelector()
+        try:
+            try:
+                selector.register(stdout, selectors.EVENT_READ)
+            except (OSError, ValueError) as exc:
+                raise OSError("Docling worker control pipe was closed") from exc
+            while True:
+                newline = self._control_buffer.find(b"\n")
+                if newline >= 0:
+                    raw_line = bytes(self._control_buffer[:newline])
+                    del self._control_buffer[:newline + 1]
+                    try:
+                        message = json.loads(raw_line)
+                    except json.JSONDecodeError as exc:
+                        raise OSError(
+                            f"invalid Docling worker response: {raw_line!r}"
+                        ) from exc
+                    if not isinstance(message, list):
+                        raise OSError(
+                            f"invalid Docling worker response: {message!r}"
+                        )
+                    return message
+                with self._lifecycle_lock:
+                    if self.closed or self._process is not process:
+                        raise OSError("Docling worker was closed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Docling worker deadline exceeded")
+                try:
+                    ready = selector.select(min(0.25, remaining))
+                except (OSError, ValueError) as exc:
+                    raise OSError("Docling worker control pipe was closed") from exc
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(stdout.fileno(), 65536)
+                except (OSError, ValueError) as exc:
+                    raise OSError("Docling worker control pipe was closed") from exc
+                if not chunk:
+                    raise EOFError("Docling worker closed its control pipe")
+                self._control_buffer.extend(chunk)
+                if len(self._control_buffer) > _CONTROL_MESSAGE_LIMIT:
+                    raise OSError("Docling worker control message exceeded 1 MiB")
+        finally:
+            selector.close()
+
+    def _stop(self, *, graceful: bool = False) -> None:
+        with self._lifecycle_lock:
+            process = self._process
+            self._process = None
+            self._control_buffer.clear()
+
+            if process is not None:
+                if graceful and process.poll() is None and process.stdin is not None:
+                    with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+                        process.stdin.write('["shutdown"]\n')
+                        process.stdin.flush()
+                if process.stdin is not None:
+                    with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+                        process.stdin.close()
+                try:
+                    process.wait(timeout=2 if graceful else 0)
+                except subprocess.TimeoutExpired:
+                    pass
+                if process.poll() is None:
+                    self._signal_process(process, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=_WORKER_JOIN_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if process.poll() is None:
+                    self._signal_process(process, signal.SIGKILL)
+                    try:
+                        process.wait(timeout=_WORKER_JOIN_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        logger.critical(
+                            "Docling worker %s could not be reaped after SIGKILL",
+                            process.pid,
+                        )
+                if process.stdout is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        process.stdout.close()
+
+            if self._diagnostics_stream is not None:
+                self._diagnostics_stream.close()
+                self._diagnostics_stream = None
+
+            if self._diagnostics_path:
+                Path(self._diagnostics_path).unlink(missing_ok=True)
+                self._diagnostics_path = None
+
+    @staticmethod
+    def _signal_process(process: subprocess.Popen[str], sig: signal.Signals) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, sig)
+            elif sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    def _start(self) -> None:
+        with self._lifecycle_lock:
+            self._stop()
+            fd, diagnostics_path = tempfile.mkstemp(
+                prefix="eurlex-docling-", suffix=".log"
+            )
+            os.close(fd)
+            self._diagnostics_path = diagnostics_path
+            diagnostics_stream = open(
+                diagnostics_path, "a", encoding="utf-8", buffering=1,
+            )
+            self._diagnostics_stream = diagnostics_stream
+            environment = os.environ.copy()
+            environment.update({
+                "OMP_NUM_THREADS": "2",
+                "MKL_NUM_THREADS": "2",
+                "VECLIB_MAXIMUM_THREADS": "2",
+                "TOKENIZERS_PARALLELISM": "false",
+            })
+            try:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        self._worker_module,
+                        diagnostics_path,
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=diagnostics_stream,
+                    text=True,
+                    bufsize=1,
+                    env=environment,
+                    start_new_session=True,
+                )
+            except Exception:
+                diagnostics_stream.close()
+                self._diagnostics_stream = None
+                self._diagnostics_path = None
+                Path(diagnostics_path).unlink(missing_ok=True)
+                raise
+            self._process = process
+            self._control_buffer.clear()
+
+        try:
+            message = self._wait_for_message(process, self._startup_timeout)
+        except (EOFError, OSError, TimeoutError) as exc:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=0.5)
+            exitcode = process.poll()
+            detail = self._diagnostic_tail()
+            self._stop()
+            raise RuntimeError(
+                f"Docling worker exited during initialization ({exitcode=}): "
+                f"{detail or exc}"
+            ) from exc
+        if not message or message[0] != "ready":
+            detail = message[1] if message and len(message) > 1 else "invalid response"
+            diagnostics = self._diagnostic_tail()
+            self._stop()
+            raise RuntimeError(
+                f"Docling worker initialization failed: {detail}"
+                + (f"; diagnostics: {diagnostics}" if diagnostics else "")
+            )
+        _record_startup_success()
+
+    def convert(self, pdf_path: str) -> _DoclingResult:
+        if self.closed:
+            raise RuntimeError("Docling worker client is closed")
+        process = self._process
+        if process is None or process.poll() is not None:
+            try:
+                self._start()
+            except Exception as exc:
+                return _DoclingResult(
+                    failure_reason="startup", error=f"{type(exc).__name__}: {exc}"
+                )
+            process = self._process
+            if process is None:
+                return _DoclingResult(
+                    failure_reason="startup",
+                    error="Docling worker did not become available",
+                )
+        self._request_id += 1
+        request_id = self._request_id
+        fd, output_path = tempfile.mkstemp(prefix="eurlex-docling-", suffix=".md")
+        os.close(fd)
+        try:
+            self._clear_diagnostics()
+            try:
+                if process.stdin is None:
+                    raise BrokenPipeError("worker stdin is unavailable")
+                process.stdin.write(json.dumps([
+                    "convert", request_id, pdf_path, output_path,
+                ]) + "\n")
+                process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                exitcode = process.poll()
+                diagnostics = self._diagnostic_tail()
+                self._stop()
+                return _DoclingResult(
+                    failure_reason="crash",
+                    error=f"worker send failed ({exitcode=}): {diagnostics or exc}",
                 )
 
-                options = PdfPipelineOptions(document_timeout=_PDF_TIMEOUT)
-                _converter = DocumentConverter(format_options={
-                    InputFormat.PDF: PdfFormatOption(pipeline_options=options),
-                })
-                logger.debug("Docling DocumentConverter initialized")
-    return _converter
+            try:
+                message = self._wait_for_message(process, self._conversion_timeout)
+            except TimeoutError:
+                diagnostics = self._diagnostic_tail()
+                self._stop()
+                return _DoclingResult(
+                    failure_reason="timeout",
+                    error=diagnostics or "conversion deadline exceeded",
+                )
+            except (EOFError, OSError) as exc:
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=0.5)
+                exitcode = process.poll()
+                diagnostics = self._diagnostic_tail()
+                self._stop()
+                return _DoclingResult(
+                    failure_reason="crash",
+                    error=f"worker pipe closed ({exitcode=}): {diagnostics or exc}",
+                )
+            if (
+                not message
+                or len(message) != 4
+                or message[0] != "result"
+                or message[1] != request_id
+            ):
+                self._stop()
+                return _DoclingResult(
+                    failure_reason="protocol", error=f"invalid worker response: {message!r}"
+                )
+
+            _, _, status, detail = message
+            if status == "ok":
+                try:
+                    markdown = Path(output_path).read_text(encoding="utf-8")
+                except OSError as exc:
+                    self._stop()
+                    return _DoclingResult(
+                        failure_reason="protocol",
+                        error=f"worker output unavailable: {exc}",
+                    )
+                return _DoclingResult(markdown=markdown)
+
+            reason: _FailureReason = (
+                "partial" if status == "partial" else "conversion"
+            )
+            # A native page failure may leave converter state unsafe even when
+            # the child can still answer, so any non-success recycles it.
+            self._stop()
+            return _DoclingResult(failure_reason=reason, error=detail)
+        finally:
+            Path(output_path).unlink(missing_ok=True)
+
+    def close(self) -> None:
+        with self._lifecycle_lock:
+            if self.closed:
+                return
+            self.closed = True
+            self._stop(graceful=True)
+
+    def abort(self) -> None:
+        with self._lifecycle_lock:
+            if self.closed:
+                return
+            self.closed = True
+            self._stop(graceful=False)
+
+
+_worker_local = threading.local()
+_worker_registry: set[_DoclingWorkerClient] = set()
+_worker_registry_lock = threading.Lock()
+_worker_shutdown = threading.Event()
+_startup_failure_lock = threading.Lock()
+_startup_failures = 0
+_startup_circuit_error: str | None = None
+
+
+def _record_startup_failure(error: str) -> bool:
+    global _startup_failures, _startup_circuit_error
+    with _startup_failure_lock:
+        _startup_failures += 1
+        if _startup_failures >= 3:
+            _startup_circuit_error = error
+        return _startup_circuit_error is not None
+
+
+def _record_startup_success() -> None:
+    global _startup_failures, _startup_circuit_error
+    with _startup_failure_lock:
+        _startup_failures = 0
+        _startup_circuit_error = None
+
+
+def _get_startup_circuit_error() -> str | None:
+    with _startup_failure_lock:
+        return _startup_circuit_error
+
+
+def _get_docling_worker() -> _DoclingWorkerClient:
+    with _worker_registry_lock:
+        if _worker_shutdown.is_set():
+            raise RuntimeError("Docling workers are shutting down")
+        startup_error = _get_startup_circuit_error()
+        if startup_error is not None:
+            raise DoclingStartupError(
+                f"Docling startup circuit is open: {startup_error}",
+                fatal=True,
+            )
+        worker = getattr(_worker_local, "docling_worker", None)
+        if worker is None or worker.closed:
+            worker = _DoclingWorkerClient()
+            _worker_registry.add(worker)
+            _worker_local.docling_worker = worker
+    return worker
+
+
+def enable_docling_workers() -> None:
+    _worker_shutdown.clear()
+    _record_startup_success()
+
+
+def close_all_docling_workers(*, force: bool = False) -> None:
+    if force:
+        _worker_shutdown.set()
+    with _worker_registry_lock:
+        workers = list(_worker_registry)
+        _worker_registry.clear()
+    for worker in workers:
+        worker.abort() if force else worker.close()
+
+
+def _pymupdf_text_from_path(pdf_path: str, celex_id: str) -> str | None:
+    try:
+        import pymupdf
+    except ImportError:
+        logger.warning("pymupdf not installed — cannot extract %s", celex_id)
+        return None
+
+    try:
+        doc = pymupdf.open(pdf_path)
+        parts: list[str] = []
+        try:
+            for page_number in range(doc.page_count):
+                text = doc.load_page(page_number).get_text().strip()
+                if text:
+                    parts.append(text)
+        finally:
+            doc.close()
+    except Exception as exc:
+        logger.error("pymupdf extraction failed for %s: %s", celex_id, exc)
+        return None
+    return "\n\n".join(parts) if parts else None
+
+
+def extract_pdf_markdown(
+    celex_id: str,
+    raw_content: bytes,
+    *,
+    out_metadata: dict | None = None,
+) -> str | None:
+    """Extract PDF text through the isolated Docling worker or bounded fallback."""
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as pdf_file:
+        pdf_file.write(raw_content)
+        pdf_path = pdf_file.name
+
+    failure_reason: _FailureReason | None = None
+    failure_error: str | None = None
+    try:
+        if len(raw_content) > _DOCLING_SIZE_LIMIT:
+            failure_reason = "oversize"
+            logger.info(
+                "PDF for %s is %.0f MB — skipping Docling, using pymupdf",
+                celex_id, len(raw_content) / 1024 / 1024,
+            )
+        else:
+            result = _get_docling_worker().convert(pdf_path)
+            if result.markdown:
+                if out_metadata is not None:
+                    out_metadata.update({
+                        "markdown": result.markdown,
+                        "pdf_backend": "docling",
+                    })
+                logger.debug(
+                    "Docling extracted %d chars from PDF for %s",
+                    len(result.markdown), celex_id,
+                )
+                return result.markdown
+            failure_reason = result.failure_reason or "empty"
+            failure_error = result.error
+
+        if failure_reason == "startup":
+            error = failure_error or "unknown startup error"
+            raise DoclingStartupError(
+                f"Docling worker unavailable: {error}",
+                fatal=_record_startup_failure(error),
+            )
+
+        logger.warning(
+            "Docling %s for %s%s; using pymupdf",
+            failure_reason,
+            celex_id,
+            f": {failure_error}" if failure_error else "",
+        )
+        text = _pymupdf_text_from_path(pdf_path, celex_id)
+        if text:
+            logger.info(
+                "pymupdf fallback extracted %d chars for %s", len(text), celex_id
+            )
+        if out_metadata is not None:
+            out_metadata.update({
+                "markdown": text,
+                "pdf_backend": "pymupdf",
+                "pdf_fallback_reason": failure_reason,
+            })
+            if failure_error:
+                out_metadata["pdf_fallback_error"] = failure_error[-2000:]
+        return text
+    finally:
+        Path(pdf_path).unlink(missing_ok=True)
 
 
 class PdfExtractor:
@@ -50,9 +550,6 @@ class PdfExtractor:
     def can_handle(self, raw_content: bytes) -> bool:
         """Return True if content is a PDF."""
         return raw_content[:5] == b"%PDF-"
-
-    # Skip Docling for PDFs larger than 50 MB — they cause segfaults in native code.
-    _DOCLING_SIZE_LIMIT = 50 * 1024 * 1024
 
     def extract(
         self,
@@ -74,70 +571,12 @@ class PdfExtractor:
         decision lives at Pipeline level because it needs document type and
         the ability to update `works.content_source` with provenance.
         """
-        # Docling needs a file path, so write to a temp file.
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            f.write(raw_content)
-            tmp_path = f.name
-
-        # Skip Docling for very large PDFs to avoid segfaults in native code.
-        if len(raw_content) > self._DOCLING_SIZE_LIMIT:
-            logger.info(
-                "PDF for %s is %.0f MB — skipping Docling, using pymupdf directly",
-                celex_id, len(raw_content) / 1024 / 1024,
-            )
-            return self._pymupdf_fallback(
-                tmp_path, celex_id,
-                include_recitals=include_recitals,
-                include_articles=include_articles,
-                include_annexes=include_annexes,
-                article_granularity=article_granularity,
-                out_metadata=out_metadata,
-            )
-
-        try:
-            converter = _get_converter()
-            result = converter.convert(tmp_path)
-            if result.has_timeout_errors():
-                logger.error(
-                    "Docling conversion timed out after %ds for %s",
-                    _PDF_TIMEOUT, celex_id,
-                )
-                return self._pymupdf_fallback(
-                    tmp_path, celex_id,
-                    include_recitals=include_recitals,
-                    include_articles=include_articles,
-                    include_annexes=include_annexes,
-                    article_granularity=article_granularity,
-                    out_metadata=out_metadata,
-                )
-            markdown = result.document.export_to_markdown()
-        except Exception as exc:
-            logger.error("Docling conversion failed for %s: %s", celex_id, exc)
-            return self._pymupdf_fallback(
-                tmp_path, celex_id,
-                include_recitals=include_recitals,
-                include_articles=include_articles,
-                include_annexes=include_annexes,
-                article_granularity=article_granularity,
-                out_metadata=out_metadata,
-            )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-
-        if not markdown:
-            logger.warning("Docling returned empty text for %s", celex_id)
-            return []
-
-        logger.debug(
-            "Docling extracted %d chars from PDF for %s", len(markdown), celex_id
+        markdown = extract_pdf_markdown(
+            celex_id, raw_content, out_metadata=out_metadata,
         )
-
-        # Expose the Docling markdown so Pipeline can decide whether to run
-        # the translate-before-extract fallback for non-English legislative
-        # PDFs. Doing the decision here would be at the wrong layer — it
-        # needs document type and the ability to update works.content_source.
-        if out_metadata is not None:
-            out_metadata["markdown"] = markdown
+        if not markdown:
+            logger.warning("PDF extraction returned empty text for %s", celex_id)
+            return []
 
         # Parse the markdown into structured text units.
         units = _parse_legislative_markdown(
@@ -164,98 +603,15 @@ class PdfExtractor:
         logger.info("Extracted %d text units from PDF for %s", len(units), celex_id)
         return units
 
-    @staticmethod
-    def _pymupdf_fallback(
-        tmp_path: str,
-        celex_id: str,
-        *,
-        include_recitals: bool = True,
-        include_articles: bool = True,
-        include_annexes: bool = True,
-        article_granularity: str = "article",
-        out_metadata: dict | None = None,
-    ) -> list[dict]:
-        """Lightweight PDF text extraction via pymupdf when Docling fails."""
-        try:
-            import pymupdf
-        except ImportError:
-            logger.warning("pymupdf not installed — cannot fall back for %s", celex_id)
-            return []
-
-        try:
-            doc = pymupdf.open(tmp_path)
-            parts: list[str] = []
-            try:
-                for page_number in range(doc.page_count):
-                    text = doc.load_page(page_number).get_text()
-                    if text.strip():
-                        parts.append(text.strip())
-            finally:
-                doc.close()
-
-            full_text = "\n\n".join(parts)
-            if not full_text:
-                logger.warning("pymupdf returned empty text for %s", celex_id)
-                return []
-
-            if out_metadata is not None:
-                out_metadata["markdown"] = full_text
-
-            logger.info(
-                "pymupdf fallback extracted %d chars for %s", len(full_text), celex_id
-            )
-
-            # Try structural parsing on the raw text.
-            units = _parse_legislative_markdown(
-                full_text,
-                include_recitals=include_recitals,
-                include_articles=include_articles,
-                include_annexes=include_annexes,
-                article_granularity=article_granularity,
-            )
-            if units:
-                for unit in units:
-                    unit["text"] = _clean_pdf_artifacts(unit["text"])
-                return units
-
-            return [{
-                "type": "body",
-                "number": None,
-                "title": None,
-                "text": full_text,
-            }] if include_articles else []
-        except Exception as exc:
-            logger.error("pymupdf fallback failed for %s: %s", celex_id, exc)
-            return []
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-
 
 def extract_pdf_full_text(raw_content: bytes) -> str | None:
     """Extract raw text from PDF using pymupdf. Used for full_text column."""
-    try:
-        import pymupdf
-    except ImportError:
-        return None
-
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         f.write(raw_content)
         tmp_path = f.name
 
     try:
-        doc = pymupdf.open(tmp_path)
-        try:
-            parts = []
-            for page_number in range(doc.page_count):
-                text = doc.load_page(page_number).get_text().strip()
-                if text:
-                    parts.append(text)
-        finally:
-            doc.close()
-        return "\n\n".join(parts) if parts else None
-    except Exception as exc:
-        logger.warning("PDF full-text extraction failed: %s", exc)
-        return None
+        return _pymupdf_text_from_path(tmp_path, "full_text")
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
