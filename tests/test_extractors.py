@@ -280,6 +280,29 @@ def test_translate_markdown_skips_oj_footnote_refs(monkeypatch):
     assert result == "[en]Premier paragraphe.[en]\n(1) OJ No L 169, 12.5.1971, p. 1."
 
 
+def test_translation_model_clears_superseded_max_length(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from eurlex_builder import translate as tr
+
+    tokenizer = object()
+    model = SimpleNamespace(
+        generation_config=SimpleNamespace(max_length=512),
+    )
+    fake_transformers = SimpleNamespace(
+        MarianTokenizer=SimpleNamespace(from_pretrained=lambda name: tokenizer),
+        MarianMTModel=SimpleNamespace(from_pretrained=lambda name: model),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setattr(tr, "_models", {})
+
+    loaded_tokenizer, loaded_model = tr._get_model("fra")
+
+    assert loaded_tokenizer is tokenizer
+    assert loaded_model is model
+    assert loaded_model.generation_config.max_length is None
+
+
 def test_pdf_parser_recognizes_considering_inline_as_old_style_recital():
     md = (
         "Considering that the import levies on rice were fixed by Regulation No 2666/93,\n"

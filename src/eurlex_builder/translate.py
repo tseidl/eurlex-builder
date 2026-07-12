@@ -41,6 +41,10 @@ def _get_model(lang: str):
 
         tokenizer = MarianTokenizer.from_pretrained(model_name)
         model = MarianMTModel.from_pretrained(model_name)
+        # Marian ships max_length=512 while every call below explicitly uses
+        # max_new_tokens=512. Transformers already gives the latter precedence;
+        # clearing the superseded default avoids a warning for every chunk.
+        model.generation_config.max_length = None
         _models[lang] = (tokenizer, model)
         return (tokenizer, model)
 
