@@ -67,3 +67,63 @@ def test_translated_fallback_marker_allows_original_recital_without_translation(
     )
     codes = {issue["code"] for issue in _validate_connection(store.conn)}
     assert "translated_fallback_marker_gap" in codes
+
+
+def test_validate_reports_degenerate_translation(store):
+    store.save_work({
+        "celex_id": "X1",
+        "full_text": "Texte source.",
+        "language": "fra",
+    })
+    store.save_text_units("X1", [{
+        "type": "article",
+        "number": "1",
+        "text": "Texte source.",
+        "text_translated": "No, " * 12,
+    }])
+    store.mark_processed("X1")
+    run_id = store.start_run({"data": {"mode": "fixed"}})
+    store.finish_run(run_id, "complete")
+
+    codes = {issue["code"] for issue in _validate_connection(store.conn)}
+
+    assert "degenerate_text_unit_translation" in codes
+
+
+def test_validate_reports_marker_only_recital(store):
+    store.save_work({"celex_id": "X1", "full_text": "Summary text."})
+    store.save_text_units("X1", [{
+        "type": "recital",
+        "number": "1",
+        "text": "(1)",
+    }])
+    store.mark_processed("X1")
+
+    codes = {issue["code"] for issue in _validate_connection(store.conn)}
+
+    assert "marker_only_recital" in codes
+
+
+def test_validate_reports_recorded_translation_rejection(store):
+    store.save_work({"celex_id": "X1", "full_text": "Texte source."})
+    store.save_text_units("X1", [{
+        "type": "article", "number": "1", "text": "Texte source.",
+    }])
+    store.mark_processed("X1")
+    store.conn.execute(
+        """CREATE TABLE _translation_failures (
+               scope VARCHAR, record_id VARCHAR, celex_id VARCHAR,
+               source_sha256 VARCHAR, reason VARCHAR, attempted_at TIMESTAMP
+           )"""
+    )
+    store.conn.execute(
+        """INSERT INTO _translation_failures VALUES
+           ('unit', '1', 'X1', 'hash', 'repetitive_output', current_timestamp)"""
+    )
+
+    issues = _validate_connection(store.conn)
+
+    assert any(
+        issue["code"] == "recorded_translation_rejection" and issue["count"] == 1
+        for issue in issues
+    )

@@ -14,7 +14,12 @@ from urllib3.util.retry import Retry
 from SPARQLWrapper import SPARQLWrapper
 
 from eurlex_builder.errors import TransientSourceError
-from eurlex_builder.utils import RateLimiter, get_document_type, resolve_doc_type
+from eurlex_builder.utils import (
+    RateLimiter,
+    get_document_type,
+    normalize_html_encoding_declaration,
+    resolve_doc_type,
+)
 
 logger = logging.getLogger("eurlex_builder")
 
@@ -187,7 +192,6 @@ def _select_best_candidate(items: list[tuple[str, str, int]]) -> str | None:
 # Max HTML size before truncation at ANNEX marker (50 MB).
 _MAX_HTML_BYTES = 50 * 1024 * 1024
 
-
 def _truncate_at_annex(html_bytes: bytes, celex_id: str) -> bytes:
     """For very large documents, truncate HTML before the first ANNEX to avoid OOM."""
     if len(html_bytes) <= _MAX_HTML_BYTES:
@@ -209,6 +213,7 @@ def _truncate_at_annex(html_bytes: bytes, celex_id: str) -> bytes:
 def _flatten_content_divs(html_bytes: bytes, celex_id: str) -> bytes:
     """Flatten <div class='content'> elements by moving their children to the parent."""
     html_bytes = _truncate_at_annex(html_bytes, celex_id)
+    html_bytes = normalize_html_encoding_declaration(html_bytes)
     try:
         tree = etree.fromstring(html_bytes)
         for div in tree.xpath(".//*[local-name()='div' and @class='content']"):

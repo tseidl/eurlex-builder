@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from eurlex_builder.extractors.splitter import (
+    _find_quoted_regions,
     is_amending_article,
     split_article,
 )
@@ -362,6 +363,20 @@ def test_straight_apostrophe_inside_quoted_block_is_not_split():
     )
     assert len(units) == 1
     assert "The scope shall be broad" in units[0]["text"]
+
+
+def test_legacy_backtick_closes_straight_apostrophe_quoted_block():
+    text = (
+        "Article 2 is replaced by the following: 'Article 2 France's "
+        "obligations apply.` Article 2 This Decision is addressed to France."
+    )
+
+    regions = _find_quoted_regions(text)
+
+    inner = text.index("Article 2 France")
+    outer = text.rindex("Article 2 This Decision")
+    assert any(start <= inner < end for start, end in regions)
+    assert not any(start <= outer < end for start, end in regions)
 
 
 # ---------------------------------------------------------------------------

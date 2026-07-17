@@ -16,7 +16,7 @@ The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis
 - **Six HTML structures + PDF fallback.** Automatic detection across EUR-Lex's HTML eras (Standard OJ, Manual CSS, class-based, text-only, consolidated-norm, classless) with Docling/pymupdf for older docs that have no machine-readable HTML.
 - **Two query modes.** Fixed (give us a list of CELEX IDs / procedure numbers) or descriptive (date range + doc types + optional EuroVoc keyword filter).
 - **Inter-document relations.** Citations, amendments, legal basis, repeals, consolidations — all in one table for network analysis.
-- **Translation built in.** Non-English-only documents are translated to English via Helsinki-NLP Opus-MT, separately at document level (`works.full_text`) and per-unit (`text_units.text_translated`).
+- **Guarded translation built in.** Non-English-only documents are translated via pinned Helsinki-NLP Opus-MT revisions, separately at document level (`works.full_text`) and per-unit (`text_units.text_translated`). Token-bounded retries and quality guards reject degenerate output without replacing the source text.
 - **Reproducible + resumable.** A single YAML defines the dataset; a checkpoint table in DuckDB makes the pipeline restart-safe and incremental.
 - **Auditable runs.** DuckDB stores every validated config, its SHA-256 hash, runtime versions, and completion status; `validate` checks structural integrity without modifying the database.
 - **Parallel mode.** Multi-threaded fetching with `parallel: true`; sequential writes keep DuckDB contention-free.
@@ -313,6 +313,13 @@ Translate non-English content. Resumable; skips already-translated rows.
 | `--max-full-text-chars` | Cap for `works.full_text` translation (default 100000) |
 | `--no-full-text` | Skip `works.full_text` phase |
 | `--no-text-units` | Skip `text_units.text` phase |
+| `--retry-rejected` | Explicitly retry unchanged rows previously rejected by the translation quality policy |
+
+Translation is interruption-safe at row level. Rejected outputs remain in the
+source language and are recorded in `_translation_failures`; an ordinary resume
+skips unchanged current-policy rejections, while `--retry-rejected` tries them
+again. A source-text or policy-version change invalidates the corresponding
+ledger entry automatically.
 
 ### `eurlex-builder enrich <db>`
 
@@ -334,7 +341,7 @@ Print checkpoint summary (processed / failed counts + failure reasons).
 
 ### `eurlex-builder validate <db>`
 
-Run read-only integrity checks for checkpoint/work consistency, orphaned rows, stable unit identity, duplicate keys/order, and translated-fallback markers. The command exits non-zero when an error is found and reports expected data gaps as warnings.
+Run read-only integrity checks for checkpoint/work consistency, orphaned rows, stable unit identity, duplicate keys/order, translated-fallback markers, and degenerate stored translations. The command exits non-zero when an error is found and reports expected data gaps and recorded translation rejections as warnings.
 
 ---
 
@@ -364,7 +371,7 @@ Run read-only integrity checks for checkpoint/work consistency, orphaned rows, s
 | `full_text` | VARCHAR | Full document text (translated to English if non-English source) |
 | `full_text_original` | VARCHAR | Original-language text (non-English docs only) |
 | `full_text_html` | VARCHAR | Raw HTML (only if `store_raw_html: true`) |
-| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). `cellar_pdf_<lang>_fallback` means the PDF retry beat poor HTML extraction. A `__pymupdf_<reason>` suffix identifies degraded PDF extraction after a Docling timeout, partial result, crash, conversion error, oversize guard, or empty result; `__translated` identifies translate-before-extract output |
+| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). `cellar_html_<lang>__pdf_<lang>_fallback_<structures>` means corroborated units of the named structural types were added from a same-language PDF while HTML text was retained. A `__pymupdf_<reason>` suffix identifies degraded PDF extraction after a Docling timeout, partial result, crash, conversion error, oversize guard, or empty result; `__translated` identifies translate-before-extract output |
 | `date_entry_into_force` | DATE | Populated by `enrich` |
 | `date_end_of_validity` | DATE | Populated by `enrich`; `9999-12-31` if still in force |
 | `is_in_force` | BOOLEAN | Populated by `enrich` |
@@ -414,7 +421,7 @@ Run read-only integrity checks for checkpoint/work consistency, orphaned rows, s
 <details>
 <summary><strong>dataset_runs</strong> &nbsp;— reproducibility manifest stored in DuckDB</summary>
 
-Each pipeline invocation records its validated configuration JSON and SHA-256 hash, package and Python versions, installed extraction/translation dependency versions, Git revision and dirty-worktree flag when run from a checkout, timestamps, and final status. Run manifests remain in DuckDB and are not duplicated into the four analytical Parquet tables.
+Each pipeline invocation records its validated configuration JSON and SHA-256 hash, package and Python versions, installed extraction/translation dependency versions, Git revision and dirty-worktree flag when run from a checkout, timestamps, and final status. The pinned translation-model revisions live in the recorded source revision. Run manifests remain in DuckDB and are not duplicated into the four analytical Parquet tables.
 
 </details>
 
@@ -455,10 +462,14 @@ Use `paragraph` when each numbered paragraph encodes one obligation and that's t
 <details>
 <summary><strong>Is the data reproducible?</strong></summary>
 
-Mostly yes. The same config + the same EUR-Lex state will produce byte-identical recitals and identical structural splits. Two caveats:
+At the analytical level, with caveats. A clean Git revision, validated config,
+recorded dependency versions, and unchanged source bytes should reproduce the
+same structural content. Use `unit_key`, not the internal integer `id`, as the
+stable text-unit identity. Important limits are:
 
 1. EUR-Lex content can change post-publication (corrigenda, consolidation updates). Re-running later may pick up newer versions.
-2. Docling's PDF layout parser is mostly deterministic but very-large or scanned PDFs may extract slightly differently across runs.
+2. Docling conversion deadlines are wall-clock based. Machine load can decide whether a difficult PDF completes or receives a queryable PyMuPDF fallback suffix.
+3. Parallel completion order can change internal surrogate IDs even when `unit_key` and content are identical.
 
 </details>
 
@@ -537,7 +548,7 @@ Docling's PDF layout parser can segment paragraphs differently across versions. 
 <details>
 <summary><strong>What is the translate-before-extract fallback?</strong></summary>
 
-The legislative PDF extractor uses English-only markers (`Whereas:`, `HAS ADOPTED THIS REGULATION:`, `ANNEX`). For non-English PDFs where these markers don't fire, the pipeline translates the Docling markdown to English via Opus-MT and re-parses from there. This fires when a requested structure is conspicuously missing, including fewer than three requested recitals or no requested articles. The translated parse is adopted only when at least one requested structure count improves and none regress. Affected rows are marked with `content_source` ending in `__translated` and have `text_translated` pre-filled. The alternative — adding native markers for every EU language — was rejected as a maintenance burden.
+The legislative PDF extractor uses English-only markers (`Whereas:`, `HAS ADOPTED THIS REGULATION:`, `ANNEX`). For non-English PDFs where these markers don't fire, the pipeline translates the Docling markdown to English via Opus-MT and re-parses from there. This fires when a requested structure is conspicuously missing, including fewer than three requested recitals or no requested articles. The translated parse is adopted only when at least one requested structure count improves and none regress. Translation is all-or-nothing under the same quality guards used by the standalone command. Affected rows are marked with `content_source` ending in `__translated` and have `text_translated` pre-filled. The alternative — adding native markers for every EU language — was rejected as a maintenance burden.
 
 </details>
 

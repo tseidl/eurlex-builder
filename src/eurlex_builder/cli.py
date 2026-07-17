@@ -67,6 +67,10 @@ def main(argv: list[str] | None = None) -> None:
         "--no-text-units", action="store_true",
         help="Skip text_units.text translation entirely (only translate works.full_text).",
     )
+    translate_parser.add_argument(
+        "--retry-rejected", action="store_true",
+        help="Retry translations previously rejected by quality guards.",
+    )
 
     # enrich subcommand
     enrich_parser = sub.add_parser(
@@ -106,6 +110,7 @@ def main(argv: list[str] | None = None) -> None:
             max_full_text_chars=args.max_full_text_chars,
             translate_full_text=not args.no_full_text,
             translate_text_units=not args.no_text_units,
+            retry_rejected=args.retry_rejected,
         )
     elif args.command == "enrich":
         _enrich(args.db, select=args.select, parallel=args.parallel,
@@ -147,6 +152,7 @@ def _translate(
     max_full_text_chars: int = 100_000,
     translate_full_text: bool = True,
     translate_text_units: bool = True,
+    retry_rejected: bool = False,
 ) -> None:
     _require_db(db_path)
     import logging
@@ -157,6 +163,7 @@ def _translate(
         translate_full_text=translate_full_text,
         translate_text_units=translate_text_units,
         max_full_text_chars=max_full_text_chars,
+        retry_rejected=retry_rejected,
     )
 
 

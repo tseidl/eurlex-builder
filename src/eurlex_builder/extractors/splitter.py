@@ -67,7 +67,13 @@ _REPLACEMENT_INTRO = re.compile(
 # they were paragraphs of the amending act. We detect the open-quote that
 # follows a colon and find its matching close.
 _QUOTED_BLOCK_OPEN = re.compile(r":\s*([\'‘\"“«])")
-_CLOSE_QUOTE_FOR = {"'": "'", "‘": "’", '"': '"', "“": "”", "«": "»"}
+_CLOSE_QUOTES_FOR = {
+    "'": ("'", "`", "´", "’"),
+    "‘": ("’", "'", "`"),
+    '"': ('"',),
+    "“": ("”", '"'),
+    "«": ("»",),
+}
 
 # A close-quote candidate only ends the region when followed by punctuation,
 # a newline, or end-of-text (OJ convention: quoted blocks end with ’. ’; ’,).
@@ -76,17 +82,21 @@ _CLOSE_QUOTE_FOR = {"'": "'", "‘": "’", '"': '"', "“": "”", "«": "»"}
 _PUNCT_AFTER_CLOSE = ".,;:)\n"
 
 
-def _find_close_quote(text: str, start: int, close_q: str) -> int:
+def _find_close_quote(text: str, start: int, close_quotes: tuple[str, ...]) -> int:
     """Find the first close-quote that isn't a word-internal apostrophe."""
-    pos = start
-    while True:
-        idx = text.find(close_q, pos)
-        if idx == -1:
-            return -1
-        following = text[idx + 1 : idx + 2]
-        if not following or following in _PUNCT_AFTER_CLOSE:
-            return idx
-        pos = idx + 1
+    valid: list[int] = []
+    for close_quote in close_quotes:
+        pos = start
+        while True:
+            idx = text.find(close_quote, pos)
+            if idx == -1:
+                break
+            following = text[idx + 1 : idx + 2]
+            if not following or following in _PUNCT_AFTER_CLOSE:
+                valid.append(idx)
+                break
+            pos = idx + 1
+    return min(valid, default=-1)
 
 
 def _find_quoted_regions(text: str) -> list[tuple[int, int]]:
@@ -98,14 +108,17 @@ def _find_quoted_regions(text: str) -> list[tuple[int, int]]:
         if not m:
             break
         open_q = m.group(1)
-        close_q = _CLOSE_QUOTE_FOR[open_q]
-        close_idx = _find_close_quote(text, m.end(), close_q)
+        close_quotes = _CLOSE_QUOTES_FOR[open_q]
+        close_idx = _find_close_quote(text, m.end(), close_quotes)
         if close_idx == -1:
             # No punctuation-gated close. If the close character occurs at
             # all, this is an inline quoted term ("known as: ‘Erasmus+’ and
             # shall…") — close there rather than swallowing the rest of the
             # article and suppressing its paragraph markers.
-            close_idx = text.find(close_q, m.end())
+            for close_quote in (*close_quotes[1:], close_quotes[0]):
+                close_idx = text.find(close_quote, m.end())
+                if close_idx != -1:
+                    break
         if close_idx == -1:
             # The quote genuinely never closes: after ": ‘" everything that
             # follows is replacement content.

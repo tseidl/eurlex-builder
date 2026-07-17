@@ -13,7 +13,14 @@ from __future__ import annotations
 from lxml import etree
 
 from eurlex_builder.extractors.html import HtmlExtractor, _INLINE_REF_START_RE, _walk_article_body
-from eurlex_builder.extractors.pdf import _parse_legislative_markdown
+from eurlex_builder.extractors.pdf import (
+    PdfExtractor,
+    _article_sequence_is_complete,
+    _merge_complete_pymupdf_articles,
+    _parse_legislative_markdown,
+    _repair_displaced_operative_block,
+    _repair_embedded_operative_markers,
+)
 from eurlex_builder.pipeline import _should_run_translate_fallback
 
 
@@ -126,6 +133,303 @@ def test_pdf_parser_recognizes_have_adopted_decision_variant():
     recitals = [u for u in units if u.get("type") == "recital"]
     assert len(recitals) == 1
     assert "HAVE ADOPTED" not in recitals[0]["text"]
+
+
+def test_pdf_text_layer_articles_fill_incomplete_docling_sequence_only():
+    docling = [
+        {"type": "recital", "number": "1", "text": "First reason"},
+        {"type": "recital", "number": "2", "text": "Second reason"},
+        {"type": "article", "number": "2", "text": "Second operative rule"},
+    ]
+    text_layer = [
+        {"type": "recital", "number": "2", "text": "Reversed reason"},
+        {"type": "recital", "number": "1", "text": "Reversed reason"},
+        {"type": "article", "number": "1", "text": "First operative rule"},
+        {"type": "article", "number": "2", "text": "Inferior replacement"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert repaired
+    assert [unit["number"] for unit in merged if unit["type"] == "recital"] == [
+        "1", "2",
+    ]
+    assert [unit["number"] for unit in merged if unit["type"] == "article"] == [
+        "1", "2",
+    ]
+    assert next(
+        unit["text"] for unit in merged
+        if unit["type"] == "article" and unit["number"] == "2"
+    ) == "Second operative rule"
+
+
+def test_pdf_text_layer_articles_extend_single_docling_article():
+    docling = [
+        {"type": "article", "number": "1", "text": "Preferred first rule"},
+    ]
+    text_layer = [
+        {"type": "article", "number": "1", "text": "Inferior first rule"},
+        {"type": "article", "number": "2", "text": "Second operative rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert repaired
+    assert [unit["number"] for unit in merged] == ["1", "2"]
+    assert merged[0]["text"] == "Preferred first rule"
+
+
+def test_pdf_text_layer_normalizes_one_numeric_rotation_only():
+    docling = [
+        {"type": "article", "number": "1", "text": "Preferred first rule"},
+        {"type": "article", "number": "4", "text": "Preferred final rule"},
+    ]
+    text_layer = [
+        {"type": "article", "number": "2", "text": "Second operative rule"},
+        {"type": "article", "number": "3", "text": "Third operative rule"},
+        {"type": "article", "number": "4", "text": "Inferior final rule"},
+        {"type": "article", "number": "1", "text": "Inferior first rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert repaired
+    assert [unit["number"] for unit in merged] == ["1", "2", "3", "4"]
+    assert merged[0]["text"] == "Preferred first rule"
+    assert merged[-1]["text"] == "Preferred final rule"
+
+
+def test_pdf_text_layer_rejects_arbitrary_numeric_reordering():
+    docling = [
+        {"type": "article", "number": "1", "text": "Preferred first rule"},
+    ]
+    text_layer = [
+        {"type": "article", "number": "1", "text": "First rule"},
+        {"type": "article", "number": "3", "text": "Third rule"},
+        {"type": "article", "number": "2", "text": "Second rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert not repaired
+    assert merged is docling
+
+
+def test_pdf_text_layer_does_not_replace_a_single_article():
+    docling = [
+        {"type": "article", "number": "1", "text": "Preferred first rule"},
+    ]
+    text_layer = [
+        {"type": "article", "number": "1", "text": "Inferior first rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert not repaired
+    assert merged is docling
+
+
+def test_pdf_text_layer_replaces_article_group_cleaned_to_empty():
+    docling = [
+        {"type": "article", "number": "1", "text": "Preferred first rule"},
+        {
+            "type": "article",
+            "number": "2",
+            "text": (
+                "This Regulation shall be binding in its entirety and directly "
+                "applicable in all Member States. Done at Brussels, 1 May 1990."
+            ),
+        },
+    ]
+    text_layer = [
+        {"type": "article", "number": "1", "text": "Inferior first rule"},
+        {"type": "article", "number": "2", "text": "Second operative rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert repaired
+    assert [unit["number"] for unit in merged] == ["1", "2"]
+    assert merged[0]["text"] == "Preferred first rule"
+    assert merged[1]["text"] == "Second operative rule"
+
+
+def test_pdf_text_layer_trims_repeated_preamble_from_recovered_article():
+    docling = [
+        {"type": "article", "number": "2", "text": "Preferred second rule"},
+    ]
+    text_layer = [
+        {
+            "type": "article",
+            "number": "1",
+            "text": (
+                "First operative rule. THE COMMISSION OF THE EUROPEAN "
+                "COMMUNITIES, Having regard to the Treaty, Whereas the measure..."
+            ),
+        },
+        {"type": "article", "number": "2", "text": "Inferior second rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert repaired
+    assert merged[0]["text"] == "First operative rule."
+    assert merged[1]["text"] == "Preferred second rule"
+
+
+def test_pdf_text_layer_drops_preamble_and_oj_fragments_before_real_paragraphs():
+    docling = [
+        {"type": "article", "number": "2", "text": "Preferred second rule"},
+    ]
+    text_layer = [
+        {
+            "type": "article",
+            "number": "1",
+            "text": (
+                "THE COMMISSION OF THE EUROPEAN COMMUNITIES, Having regard "
+                "to the Treaty, Whereas the measure should be adopted."
+            ),
+        },
+        {"type": "article", "number": "1", "text": "(') OJ No L 281,"},
+        {"type": "article", "number": "1", "text": "f5) OJ No L 205, 30."},
+        {"type": "article", "number": "1", "text": "11 . 1975, p."},
+        {"type": "article", "number": "1", "text": "First operative rule."},
+        {
+            "type": "article",
+            "number": "1",
+            "text": (
+                "Second operative paragraph. No L 188/9 7. 81 Official Journal "
+                "of the European Communities"
+            ),
+        },
+        {
+            "type": "article",
+            "number": "1",
+            "text": "Third operative paragraph. (') OJ No L 281, 1.1.1990, p. 1.",
+        },
+        {
+            "type": "article",
+            "number": "1",
+            "text": (
+                "7. 81 Official Journal of the European Communities No L 188/9 "
+                "Fourth operative paragraph."
+            ),
+        },
+        {"type": "article", "number": "2", "text": "Inferior second rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert repaired
+    article_one = [unit["text"] for unit in merged if unit["number"] == "1"]
+    assert article_one == [
+        "First operative rule.",
+        "Second operative paragraph.",
+        "Third operative paragraph.",
+        "Fourth operative paragraph.",
+    ]
+
+
+def test_pdf_text_layer_uses_docling_for_sanitized_empty_candidate_number():
+    docling = [
+        {"type": "article", "number": "1", "text": "Preferred first rule"},
+    ]
+    text_layer = [
+        {
+            "type": "article",
+            "number": "1",
+            "text": (
+                "THE COMMISSION OF THE EUROPEAN COMMUNITIES, Having regard "
+                "to the Treaty, Whereas the measure should be adopted."
+            ),
+        },
+        {"type": "article", "number": "2", "text": "Second operative rule"},
+    ]
+
+    merged, repaired = _merge_complete_pymupdf_articles(docling, text_layer)
+
+    assert repaired
+    assert [unit["number"] for unit in merged] == ["1", "2"]
+    assert merged[0]["text"] == "Preferred first rule"
+    assert merged[1]["text"] == "Second operative rule"
+
+
+def test_pdf_article_sequence_rejects_gaps_and_spurious_references():
+    def make(numbers):
+        return [
+            {"type": "article", "number": number, "text": "rule"}
+            for number in numbers
+        ]
+
+    assert _article_sequence_is_complete(make(["1", "1a", "2"]))
+    assert not _article_sequence_is_complete(make(["2"]))
+    assert not _article_sequence_is_complete(make(["1", "3"]))
+    assert not _article_sequence_is_complete(make(["2", "3", "85"]))
+
+
+def test_pdf_extractor_repairs_incomplete_docling_articles_from_text_layer(monkeypatch):
+    import eurlex_builder.extractors.pdf as pdf_module
+
+    docling = """Whereas the measure should be corrected,
+HAS ADOPTED THIS REGULATION:
+Article 2
+This Regulation shall enter into force tomorrow.
+"""
+    text_layer = """Whereas the measure should be corrected,
+HAS ADOPTED THIS REGULATION:
+Article 1
+The incorrect date is replaced.
+Article 2
+This Regulation shall enter into force tomorrow.
+"""
+
+    def extract_markdown(celex_id, raw_content, *, out_metadata=None):
+        out_metadata.update({"markdown": docling, "pdf_backend": "docling"})
+        return docling
+
+    monkeypatch.setattr(pdf_module, "extract_pdf_markdown", extract_markdown)
+    monkeypatch.setattr(pdf_module, "extract_pdf_full_text", lambda raw: text_layer)
+    metadata = {}
+
+    units = PdfExtractor().extract("X-PDF-DUAL", b"%PDF-fake", out_metadata=metadata)
+
+    assert [unit["number"] for unit in units if unit["type"] == "article"] == [
+        "1", "2",
+    ]
+    assert metadata["pdf_representation_repair"] == "pymupdf_articles"
+
+
+def test_pdf_extractor_uses_cached_text_layer_for_single_article_repair(monkeypatch):
+    import eurlex_builder.extractors.pdf as pdf_module
+
+    docling = """HAS ADOPTED THIS REGULATION:
+Article 1
+The first operative rule.
+"""
+    text_layer = """HAS ADOPTED THIS REGULATION:
+Article 1
+The first operative rule.
+Article 2
+This Regulation shall enter into force tomorrow.
+"""
+
+    def extract_markdown(celex_id, raw_content, *, out_metadata=None):
+        out_metadata.update({"markdown": docling, "pdf_backend": "docling"})
+        return docling
+
+    def unexpected_extract(raw_content):
+        raise AssertionError("cached PDF text layer should be reused")
+
+    monkeypatch.setattr(pdf_module, "extract_pdf_markdown", extract_markdown)
+    monkeypatch.setattr(pdf_module, "extract_pdf_full_text", unexpected_extract)
+    metadata = {"pdf_text_layer": text_layer}
+
+    units = PdfExtractor().extract("X-PDF-CACHED", b"%PDF-fake", out_metadata=metadata)
+
+    assert [unit["number"] for unit in units if unit["type"] == "article"] == [
+        "1", "2",
+    ]
+    assert metadata["pdf_representation_repair"] == "pymupdf_articles"
 
 
 # ---------------------------------------------------------------------------
@@ -289,9 +593,19 @@ def test_translation_model_clears_superseded_max_length(monkeypatch):
     model = SimpleNamespace(
         generation_config=SimpleNamespace(max_length=512),
     )
+    calls = []
+
+    def load_tokenizer(name, *, revision):
+        calls.append(("tokenizer", name, revision))
+        return tokenizer
+
+    def load_model(name, *, revision):
+        calls.append(("model", name, revision))
+        return model
+
     fake_transformers = SimpleNamespace(
-        MarianTokenizer=SimpleNamespace(from_pretrained=lambda name: tokenizer),
-        MarianMTModel=SimpleNamespace(from_pretrained=lambda name: model),
+        MarianTokenizer=SimpleNamespace(from_pretrained=load_tokenizer),
+        MarianMTModel=SimpleNamespace(from_pretrained=load_model),
     )
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
     monkeypatch.setattr(tr, "_models", {})
@@ -301,6 +615,10 @@ def test_translation_model_clears_superseded_max_length(monkeypatch):
     assert loaded_tokenizer is tokenizer
     assert loaded_model is model
     assert loaded_model.generation_config.max_length is None
+    assert calls == [
+        ("tokenizer", *tr.MODEL_MAP["fra"]),
+        ("model", *tr.MODEL_MAP["fra"]),
+    ]
 
 
 def test_pdf_parser_recognizes_considering_inline_as_old_style_recital():
@@ -643,6 +961,48 @@ def test_text_only_one_line_article_body_is_not_lost_to_title():
     assert art1["title"] is None
 
 
+def test_text_only_closing_article_is_not_lost_when_boilerplate_is_stripped():
+    from eurlex_builder.extractors.html import HtmlExtractor
+    from eurlex_builder.utils import strip_boilerplate
+
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAS ADOPTED THIS REGULATION:</p>
+<p>Article 1</p><p>The levy shall be fixed at EUR 10.</p>
+<p>Article 2</p><p>This Regulation shall enter into force on 1 July 1982</p>
+<p>This Regulation shall be binding in its entirety and directly applicable in all Member States.</p>
+<p>Done at Brussels, 29 June 1982.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("31982R1680", raw)
+    article = [
+        unit for unit in units
+        if unit["type"] == "article" and unit["number"] == "2"
+    ][0]
+
+    assert article["title"] is None
+    assert strip_boilerplate(article["text"]) == (
+        "This Regulation shall enter into force on 1 July 1982"
+    )
+
+
+def test_text_only_addressee_article_is_not_misclassified_as_title():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The aid is compatible with the common market.</p>
+<p>Article 2</p><p>This Decision is addressed to the French Republic</p>
+<p>Done at Brussels, 11 March 1983.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("31983D0142", raw)
+    article = [
+        unit for unit in units
+        if unit["type"] == "article" and unit["number"] == "2"
+    ][0]
+
+    assert article["title"] is None
+    assert article["text"].startswith("This Decision is addressed")
+
+
 def test_com_signature_rejects_lowercase_continuations():
     from eurlex_builder.extractors.html import _is_com_signature
 
@@ -685,6 +1045,820 @@ List of products
     annex = [u for u in units if u["type"] == "annex"][0]
     assert "List of products" in annex["text"]
     assert "OJ L 123" not in annex["text"]
+
+
+def test_pdf_parser_repairs_leading_signature_reading_order_and_titled_annex():
+    md = """Done at Brussels, 2 July 1990.
+(1) OJ No L 281, 1.11.1975, p. 1.
+## COMMISSION REGULATION (EEC) No 1856/90
+of 2 July 1990
+Whereas the import levies should be altered,
+HAS ADOPTED THIS REGULATION:
+## Article 1
+The levies shall be as set out in the Annex.
+## Article 2
+This Regulation shall enter into force tomorrow.
+For the Commission
+ANNEX to the Commission Regulation of 2 July 1990 fixing the import levies
+| CN code | Levy |
+| 1001 | 20 |
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("article", "1"),
+        ("article", "2"),
+        ("annex", None),
+    ]
+    assert "CN code" in units[-1]["text"]
+
+
+def test_pdf_parser_moves_operative_block_emitted_after_signature():
+    md = """## COMMISSION REGULATION (EEC) No 2992/92
+Whereas refunds should be fixed as set out in the Annex;
+Whereas the measures are in accordance with the committee opinion,
+This Regulation shall be binding in its entirety and directly applicable.
+Done at Brussels, 15 October 1992.
+HAS ADOPTED THIS REGULATION:
+## Article 1
+The refunds shall be as set out in the Annex.
+## Article 2
+This Regulation shall enter into force tomorrow.
+For the Commission
+## ANNEX
+| Product | Refund |
+| Rice | 10 |
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("recital", "2"),
+        ("article", "1"),
+        ("article", "2"),
+        ("annex", None),
+    ]
+    assert "enter into force" in units[3]["text"]
+
+
+def test_pdf_parser_repairs_stranded_second_article_before_signature():
+    md = """Whereas the levies Article 2
+This Regulation shall enter into force tomorrow.
+This Regulation shall be binding in its entirety and directly applicable.
+Done at Brussels, 17 December 1979.
+(1) OJ No L 1, 1.1.1979, p. 1.
+at present in force should be altered to the amounts in the Annex,
+HAS ADOPTED THIS REGULATION:
+## Article 1
+The levies shall be as set out in the Annex.
+## ANNEX
+| Product | Levy |
+| Sugar | 20 |
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("article", "1"),
+        ("article", "2"),
+        ("annex", None),
+    ]
+    assert "at present in force" in units[0]["text"]
+    assert "enter into force" in units[2]["text"]
+
+
+def test_pdf_parser_moves_article_continuation_emitted_after_signature():
+    md = """Whereas the measures are appropriate,
+HAS ADOPTED THIS REGULATION:
+## Article 1
+First rule.
+## Article 2
+Second rule begins.
+This Regulation shall be binding in its entirety and directly applicable.
+Done at Brussels, 20 April 1989.
+- a continuation of the second rule.
+3. A further paragraph of the second rule.
+## Article 3
+The security shall be EUR 100.
+## Article 4
+The earlier Regulation is repealed.
+## Article 5
+This Regulation shall enter into force tomorrow.
+For the Commission
+## ANNEX
+Annex content.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [article["number"] for article in articles] == ["1", "2", "3", "4", "5"]
+    assert "continuation of the second rule" in articles[1]["text"]
+
+
+def test_pdf_parser_keeps_real_post_signature_attachment_in_place():
+    md = """## Article 1
+The Decision is approved.
+Done at Brussels, 1 January 2000.
+## AGREEMENT
+## Article 1
+The Parties agree.
+"""
+
+    repaired = _repair_displaced_operative_block(md.split("\n"))
+
+    assert repaired == md.split("\n")
+
+
+def test_pdf_parser_keeps_post_signature_attachment_with_formula_in_place():
+    md = """## Article 1
+The Decision is approved.
+## Article 2
+This Decision shall enter into force.
+Done at Brussels, 1 January 2000.
+## AGREEMENT
+The parties seek cooperation.
+HAVE AGREED AS FOLLOWS:
+## Article 1
+The Parties agree.
+## Article 2
+The Agreement enters into force.
+"""
+
+    assert _repair_displaced_operative_block(md.split("\n")) == md.split("\n")
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+    assert [unit["number"] for unit in units if unit["type"] == "article"] == [
+        "1", "2",
+    ]
+
+
+def test_pdf_parser_keeps_modifier_led_post_signature_attachments_in_place():
+    titles = [
+        "## COOPERATION AGREEMENT between the parties",
+        "## EXCHANGE OF LETTERS concerning trade",
+        "## ADDITIONAL PROTOCOL to the Agreement",
+        "## EUROPE AGREEMENT establishing an association",
+        "## MEMORANDUM OF UNDERSTANDING on cooperation",
+        "## ARRANGEMENT concerning products",
+        "Cooperation Agreement between the parties",
+        "Exchange of Letters concerning trade",
+        "Additional Protocol to the Agreement",
+        "Framework for Cooperation",
+        "Joint Declaration",
+    ]
+    for title in titles:
+        md = f"""## Article 1
+The Decision is approved.
+Done at Brussels, 1 January 2000.
+{title}
+The parties seek cooperation.
+HAVE AGREED AS FOLLOWS:
+## Article 1
+The Parties agree.
+"""
+
+        assert _repair_displaced_operative_block(md.split("\n")) == md.split("\n")
+
+
+def test_pdf_parser_moves_outer_articles_interleaved_into_quoted_table():
+    md = """HAS ADOPTED THIS DECISION:
+Article 1
+Article 1 of the earlier Decision is replaced by the following:
+'Article 1
+| Person | City |
+| A | Vienna |
+| B | Brussels | Article 2 This Decision shall take effect today. Article 3
+| C | Paris |
+This Decision shall be published in the Official Journal.
+Done at Brussels, 28 February 2000.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [article["number"] for article in articles] == ["1", "2", "3"]
+    assert "| C | Paris |" in articles[0]["text"]
+    assert articles[1]["text"] == "This Decision shall take effect today."
+    assert "shall be published" in articles[2]["text"]
+
+
+def test_pdf_parser_keeps_article_reference_inside_numbered_recital():
+    md = """Whereas:
+(1) The programme should be established.
+(2)
+Article 112 of Council Regulation (EC) No 1605/2002
+lays down strict conditions for financial assistance.
+(3) A further safeguard is required.
+HAVE DECIDED AS FOLLOWS:
+Article 1
+This Decision establishes the programme.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in recitals] == ["1", "2", "3"]
+    assert "Article 112 of Council Regulation" in recitals[1]["text"]
+    assert [unit["number"] for unit in articles] == ["1"]
+
+
+def test_pdf_parser_drops_marker_only_table_recitals():
+    md = """Whereas:
+(25)
+(19)
+(48)
+HAS ADOPTED THIS DECISION:
+Article 1
+The aid is compatible with the common market.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    assert not [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in units if unit["type"] == "article"] == ["1"]
+
+
+def test_pdf_parser_accepts_inline_article_body_after_enacting_formula():
+    md = """HAVE DECIDED AS FOLLOWS:
+Article 1 The following measure is approved.
+Article 2 The addressee shall comply.
+Article 3 This Decision shall enter into force.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2", "3"]
+    assert articles[1]["text"] == "The addressee shall comply."
+
+
+def test_pdf_parser_splits_formula_and_articles_flattened_onto_recital_line():
+    md = """Whereas the measures are appropriate, HAVE ADOPTED THIS REGULATION: Article 1 The levy shall be EUR 10. Article 2 This Regulation shall enter into force tomorrow.
+This Regulation shall be binding in its entirety.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    assert [(unit["type"], unit["number"]) for unit in units] == [
+        ("recital", "1"),
+        ("article", "1"),
+        ("article", "2"),
+    ]
+    assert units[0]["text"] == "Whereas the measures are appropriate,"
+    assert units[1]["text"] == "The levy shall be EUR 10."
+
+
+def test_pdf_parser_splits_embedded_later_article_after_formula():
+    md = """HAS ADOPTED THIS REGULATION:
+Article 1
+First rule.
+Article 2
+Second rule. Article 3 Regulation (EEC) No 1/80 is hereby repealed.
+Article 4
+This Regulation shall enter into force tomorrow.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2", "3", "4"]
+    assert articles[2]["text"] == "Regulation (EEC) No 1/80 is hereby repealed."
+
+
+def test_embedded_article_repair_does_not_split_inline_cross_references():
+    lines = [
+        "HAS ADOPTED THIS REGULATION:",
+        "Article 1 The products listed in Article 1 (2) and Article 3 of Regulation "
+        "No 1/80 shall qualify.",
+    ]
+
+    assert _repair_embedded_operative_markers(lines) == lines
+
+
+def test_pdf_parser_does_not_promote_articles_inside_quoted_replacement_law():
+    md = """HAS ADOPTED THIS REGULATION:
+Article 1
+Regulation (EEC) No 1/80 is amended as follows: 'Article 2 Replacement text applies. Article 3 Further replacement text applies.'
+Article 2
+This Regulation shall enter into force tomorrow.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+    assert "Article 3 Further replacement text" in articles[0]["text"]
+
+
+def test_pdf_parser_does_not_promote_multiline_quoted_replacement_articles():
+    md = """HAS ADOPTED THIS REGULATION:
+Article 1
+Regulation (EEC) No 1/80 is amended as follows:
+'Article 2
+Replacement text applies.
+Article 3
+Further replacement text applies.'.
+Article 2
+This Regulation shall enter into force tomorrow.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+    assert "Article 3 Further replacement text" in articles[0]["text"]
+
+
+def test_embedded_article_repair_keeps_unpunctuated_cross_reference():
+    md = """HAS ADOPTED THIS REGULATION:
+Article 1
+The measure applies subject to Article 3 This Regulation describes elsewhere.
+Article 2
+This Regulation shall enter into force tomorrow.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+    assert "subject to Article 3" in articles[0]["text"]
+
+
+def test_pdf_parser_recovers_trailing_article_markers_from_docling_columns():
+    md = """Whereas the measures are appropriate, HAS ADOPTED THIS REGULATION: exported in the natural state, shall be set out in the Annex Article 1
+The export refunds on the listed products
+shall apply to those products, Article 2
+This Regulation shall enter into force tomorrow.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+    assert articles[0]["text"] == (
+        "The export refunds on the listed products shall apply to those products, "
+        "exported in the natural state, shall be set out in the Annex"
+    )
+    assert articles[1]["text"] == "This Regulation shall enter into force tomorrow."
+
+
+def test_trailing_article_repair_does_not_split_end_of_line_cross_reference():
+    lines = [
+        "HAS ADOPTED THIS REGULATION:",
+        "Article 1 The products are those referred to in Article 2",
+        "of Regulation (EEC) No 1/80.",
+    ]
+
+    assert _repair_embedded_operative_markers(lines) == lines
+
+
+def test_pdf_parser_rejects_line_wrapped_inline_article_reference():
+    md = """Having regard to Article
+7 thereof,
+Whereas the measures are appropriate,
+HAS ADOPTED THIS REGULATION:
+Article 1
+The levy shall be EUR 10.
+Article 2
+This Regulation shall enter into force tomorrow.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+
+
+def test_pdf_parser_recognizes_multilingual_annex_heading():
+    md = """## Article 1
+Rules apply.
+Dont at Brussels, 18 January 1983.
+## ANNEXE - ANHANG - ALLEGATO - BIJLAGE - ANNEX - BILAG ΠΑΡΑΡΤΗΜΑ
+| Products | Minimum prices |
+| Beef | 100 |
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+
+    annex = [unit for unit in units if unit["type"] == "annex"][0]
+    assert annex["number"] is None
+    assert "Minimum prices" in annex["text"]
+
+
+def test_pdf_parser_repairs_annex_heading_read_after_table():
+    md = """## Article 1
+Rules apply.
+Done at Brussels, 21 June 1988.
+For the Commission
+| Place of storage | Quantity |
+| North | 57 500 |
+| South | 10 000 |
+## ANNEX
+## ANNEX I
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=True,
+    )
+
+    annexes = [unit for unit in units if unit["type"] == "annex"]
+    assert [(annex["number"], annex["text"]) for annex in annexes] == [
+        ("I", "| Place of storage | Quantity | | North | 57 500 | | South | 10 000 |"),
+    ]
+
+
+def test_text_only_handles_nested_legacy_wrapper_and_inline_article_bodies():
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body><div id="TexteOnly"><p><TXT_TE>
+<p>(2) OJ No L 198, 26.7.1988, p. 35.</p>
+<p>Whereas the storage contracts were concluded during the wine year;</p>
+<p>Whereas the measures are in accordance with the committee opinion,</p>
+<p>HAS ADOPTED THIS REGULATION:</p>
+<p>Article 1 The following Article 2a is inserted:</p>
+<p>'Article 2a The amounts shall be converted.' Article 2 This Regulation enters into force today.</p>
+<p>This Regulation shall be binding in its entirety and directly applicable in all Member States.</p>
+</TXT_TE></p></div></body></html>"""
+
+    units = HtmlExtractor().extract("31988R3127", raw)
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("recital", "2"),
+        ("article", "1"),
+        ("article", "2"),
+    ]
+    assert "Article 2a The amounts" in units[2]["text"]
+    assert "enters into force" in units[3]["text"]
+
+
+def test_text_only_does_not_split_possessive_article_reference():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p>
+<p>The Member States' Article 5 obligations under the Treaty shall apply.</p>
+<p>Article 2</p><p>This Decision shall enter into force.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X-POSSESSIVE", raw)
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+    assert "Article 5 obligations" in articles[0]["text"]
+
+
+def test_text_only_does_not_promote_multiline_quoted_replacement_articles():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAS ADOPTED THIS REGULATION:</p>
+<p>Article 1</p>
+<p>Regulation (EEC) No 1/80 is amended as follows:</p>
+<p>'Article 2</p>
+<p>Replacement text applies.</p>
+<p>Article 3</p>
+<p>Further replacement text applies.'.</p>
+<p>Article 2</p>
+<p>This Regulation shall enter into force tomorrow.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X-QUOTED-LAW", raw)
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+    assert "Article 3 Further replacement text" in articles[0]["text"]
+
+
+def test_text_only_legacy_backtick_quotes_do_not_hide_outer_article():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p>
+<p>Article 2 is replaced by the following:</p>
+<p>'Article 2</p><p>France's obligations apply.`</p>
+<p>2. Article 3 is replaced by the following:</p>
+<p>'Article 3</p><p>Further replacement text applies.`</p>
+<p>Article 2</p><p>This Decision is addressed to France.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X-LEGACY-QUOTES", raw)
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2"]
+    assert "Article 3" in articles[0]["text"]
+    assert articles[1]["text"] == "This Decision is addressed to France."
+
+
+def test_text_only_splits_run_on_capitalized_whereas_clauses():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>THE COUNCIL, Having regard to the Treaty, Whereas the first reason applies;
+whereas its second sentence qualifies that reason; Whereas the second reason applies;
+Whereas the third reason applies, HAS DECIDED AS FOLLOWS:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X-RUN-ON", raw)
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+
+    assert [unit["number"] for unit in recitals] == ["1", "2", "3"]
+    assert "whereas its second sentence" in recitals[0]["text"]
+    assert all("HAS DECIDED" not in unit["text"] for unit in recitals)
+
+
+def test_text_only_accepts_consecutive_plain_numbers_after_whereas_marker():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>Whereas:</p>
+<p>A. THE FACTS</p>
+<p>1 The first reason is set out here.</p>
+<p>Supporting detail remains with the first reason.</p>
+<p>2 1.1. The second reason begins with a nested section label.</p>
+<p>3 2. The third reason begins with a top-level section label.</p>
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X-PLAIN-NUMBERS", raw)
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+
+    assert [unit["number"] for unit in recitals] == ["1", "2", "3"]
+    assert "Supporting detail" in recitals[0]["text"]
+
+
+def test_text_only_does_not_treat_date_as_plain_numbered_recital():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>Whereas:</p>
+<p>1 The first reason is set out here.</p>
+<p>2 December 1979 was fixed as the reference date.</p>
+<p>2 The second reason is set out here.</p>
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X-DATE", raw)
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+
+    assert [unit["number"] for unit in recitals] == ["1", "2"]
+    assert "2 December 1979" in recitals[0]["text"]
+
+
+def test_classless_table_column_numbers_do_not_suppress_real_recitals():
+    raw = b"""<html><body>
+<p>Whereas the first reason applies;</p>
+<p>Whereas the second reason applies,</p>
+<p>HAS ADOPTED THIS REGULATION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+<p>Done at Brussels, 1 January 2000.</p>
+<p>ANNEX</p>
+<table><tr><td>(1)</td><td>(2)</td><td>(3)</td></tr>
+<tr><td>Alpha</td><td>Beta</td><td>Gamma</td></tr></table>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X-TABLE-HEADER", raw)
+
+    assert [unit["number"] for unit in units if unit["type"] == "recital"] == [
+        "1", "2",
+    ]
+    assert [unit["number"] for unit in units if unit["type"] == "article"] == ["1"]
+
+
+def test_classless_numbered_annex_table_does_not_suppress_real_recitals():
+    raw = b"""<html><body>
+<p>Whereas the first reason applies;</p>
+<p>Whereas the second reason applies,</p>
+<p>HAS ADOPTED THIS REGULATION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+<p>Done at Brussels, 1 January 2000.</p>
+<p>ANNEX</p>
+<table><tr><td>(1)</td><td>First numbered column description.</td></tr>
+<tr><td>(2)</td><td>Second numbered column description.</td></tr>
+<tr><td>(3)</td><td>Third numbered column description.</td></tr></table>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X-NUMBERED-ANNEX", raw)
+
+    assert [unit["number"] for unit in units if unit["type"] == "recital"] == [
+        "1", "2",
+    ]
+    assert [unit["number"] for unit in units if unit["type"] == "article"] == ["1"]
+
+
+def test_classless_credible_pre_formula_table_recitals_are_retained():
+    raw = b"""<html><body>
+<p>Whereas:</p>
+<table><tr><td>(1)</td><td>The first complete reason.</td></tr>
+<tr><td>(2)</td><td>The second complete reason.</td></tr></table>
+<p>HAS ADOPTED THIS REGULATION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X-TABLE-RECITALS", raw)
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2"]
+    assert "first complete reason" in recitals[0]["text"]
+
+
+def test_text_only_does_not_promote_dotted_topic_headings_to_recitals():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>Whereas:</p>
+<p>1. Case history</p><p>Narrative discussion without recital numbers.</p>
+<p>2. Assessment</p><p>Further narrative discussion.</p>
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X-TOPIC-HEADINGS", raw)
+
+    assert not [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in units if unit["type"] == "article"] == ["1"]
+
+
+def test_html_full_text_uses_legacy_utf8_alias_without_nested_duplication():
+    from eurlex_builder.extractors.html import extract_html_full_text
+
+    raw = """<html><head><meta charset="UNICODE-1-1-UTF-8"/></head><body>
+<p><TXT_TE><p>Österreich substantive text.</p><p>Second paragraph.</p></TXT_TE></p>
+</body></html>""".encode()
+
+    full_text = extract_html_full_text(raw)
+
+    assert full_text == "Österreich substantive text. Second paragraph."
+
+
+def test_standard_html_also_extracts_class_based_attachment_articles():
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body>
+<div id="rct_1"><p>(1) The agreement should be approved.</p></div>
+<div id="art_1"><p class="oj-ti-art">Article 1</p><p>Main decision.</p></div>
+<hr class="oj-doc-sep"/>
+<div id="agr_1.art_1"><p class="oj-ti-art">Article 1</p>
+<div><p>Agreement first article.</p></div></div>
+<div id="agr_1.art_2"><p class="oj-ti-art">Article 2</p>
+<div><p>Agreement second article.</p></div></div>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X1", raw)
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("article", "1"),
+        ("article", "1"),
+        ("article", "2"),
+    ]
+    assert [unit["text"] for unit in units[1:]] == [
+        "Main decision.",
+        "Agreement first article.",
+        "Agreement second article.",
+    ]
+
+
+def test_classless_summary_joins_number_and_adjacent_table_cell_text():
+    from eurlex_builder.extractors.html import HtmlExtractor
+
+    raw = b"""<html><body><p>SUMMARY OF THE INFRINGEMENT</p>
+<table><tr><td></td><td><p>(1)</p></td>
+<td><span>The first complete summary paragraph.</span></td></tr></table>
+<table><tr><td></td><td><p>(2)</p></td>
+<td><span>The second complete summary paragraph.</span></td></tr></table>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X2", raw)
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("recital", "2"),
+    ]
+    assert units[0]["text"] == "(1) The first complete summary paragraph."
+    assert units[1]["text"] == "(2) The second complete summary paragraph."
+
+
+def test_classless_table_recitals_keep_articles_and_annexes():
+    raw = b"""<html><body>
+<table><tr><td><p>(1)</p></td><td>The complete recital.</td></tr></table>
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+<p>Done at Brussels, 1 January 2000.</p>
+<p>ANNEX</p><p>Supplementary content.</p>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X3", raw)
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("article", "1"),
+        ("annex", None),
+    ]
+    assert units[0]["text"] == "(1) The complete recital."
+    assert units[1]["text"].startswith("The operative rule.")
+    assert units[2]["text"] == "Supplementary content."
+
+
+def test_text_only_joins_marker_only_recital_with_following_paragraphs():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>Whereas:</p>
+<p>(1)</p><p>The first recital begins here.</p><p>It continues here.</p>
+<p>(2)</p><p>The second recital is complete.</p>
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X4", raw)
+
+    assert [(unit["type"], unit.get("number")) for unit in units] == [
+        ("recital", "1"),
+        ("recital", "2"),
+        ("article", "1"),
+    ]
+    assert units[0]["text"] == (
+        "(1) The first recital begins here. It continues here."
+    )
+    assert units[1]["text"] == "(2) The second recital is complete."
+
+
+def test_text_only_does_not_treat_consecutive_table_column_markers_as_recitals():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>Whereas:</p>
+<p>(1)</p><p>The market data are set out below.</p>
+<p>Table 1</p><p>(1)</p><p>(2)</p><p>(3)</p><p>100</p><p>200</p><p>300</p>
+<p>(2)</p><p>The legal assessment follows.</p>
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X5", raw)
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2"]
+    assert "Table 1 (1) (2) (3) 100 200 300" in recitals[0]["text"]
+
+
+def test_text_only_does_not_restart_recitals_at_decreasing_table_markers():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>Whereas:</p>
+<p>(7)</p><p>The seventh recital begins here.</p>
+<p>(2)+(3)</p><p>(5)+(6)</p><p>Table values.</p>
+<p>(8)</p><p>The eighth recital follows.</p>
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1</p><p>The operative rule.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X6", raw)
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["7", "8"]
+    assert "(2)+(3) (5)+(6) Table values." in recitals[0]["text"]
+
+
+def test_text_only_accepts_inline_article_body_after_enacting_formula():
+    raw = b"""<html><body><div id="TexteOnly">
+<p>HAS ADOPTED THIS DECISION:</p>
+<p>Article 1 The following measure is approved.</p>
+<p>Article 2 The addressee shall comply.</p>
+<p>Article 3 This Decision shall enter into force.</p>
+</div></body></html>"""
+
+    units = HtmlExtractor().extract("X7", raw)
+
+    articles = [unit for unit in units if unit["type"] == "article"]
+    assert [unit["number"] for unit in articles] == ["1", "2", "3"]
+    assert articles[1]["text"] == "The addressee shall comply."
 
 
 def test_class_based_empty_subtitle_yields_null_title():

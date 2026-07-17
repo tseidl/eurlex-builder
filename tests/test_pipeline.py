@@ -8,6 +8,7 @@ from eurlex_builder.extractors.html import HtmlExtractor
 from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.pipeline import (
     Pipeline,
+    _merge_pdf_structure_improvements,
     _should_run_translate_fallback,
     _translated_parse_is_better,
 )
@@ -137,6 +138,79 @@ def test_translated_fallback_prioritizes_recitals_without_losing_structure():
         unit for unit in translated if unit["type"] != "annex"
     ]
     assert not _translated_parse_is_better(source, translated_without_annex)
+
+
+def test_same_language_pdf_merges_annex_without_replacing_html_articles():
+    source = [
+        *[{"type": "recital", "number": str(i), "text": "reason"} for i in range(1, 4)],
+        *[{"type": "article", "number": str(i), "text": "operative"} for i in range(1, 5)],
+    ]
+    pdf = [
+        {"type": "recital", "number": "1", "text": "partial"},
+        *[{"type": "article", "number": str(i), "text": "partial"} for i in range(1, 5)],
+        {"type": "annex", "number": "I", "text": "Complete annex table"},
+    ]
+
+    merged, improvements = _merge_pdf_structure_improvements(source, pdf)
+
+    assert improvements == ("annex",)
+    assert [unit["number"] for unit in merged if unit["type"] == "article"] == [
+        "1", "2", "3", "4",
+    ]
+    assert [unit["number"] for unit in merged if unit["type"] == "annex"] == ["I"]
+
+
+def test_same_language_pdf_rejects_other_structures_when_articles_conflict():
+    source = [
+        *[
+            {"type": "article", "number": str(number), "text": "source"}
+            for number in range(1, 4)
+        ],
+    ]
+    pdf = [
+        *[
+            {"type": "recital", "number": str(number), "text": "reason"}
+            for number in range(1, 4)
+        ],
+        *[
+            {"type": "article", "number": str(number), "text": "candidate"}
+            for number in range(1, 3)
+        ],
+        {"type": "annex", "number": "I", "text": "Candidate annex"},
+    ]
+
+    assert _merge_pdf_structure_improvements(source, pdf) == (source, ())
+
+
+def test_same_language_pdf_adds_missing_article_without_replacing_source_text():
+    source = [{"type": "article", "number": "1", "text": "x" * 500}]
+    pdf = [
+        {"type": "article", "number": "1", "text": "short"},
+        {"type": "article", "number": "2", "text": "short"},
+    ]
+
+    merged, improvements = _merge_pdf_structure_improvements(source, pdf)
+
+    assert improvements == ("article",)
+    assert [unit["number"] for unit in merged] == ["1", "2"]
+    assert merged[0]["text"] == "x" * 500
+
+
+def test_same_language_pdf_rejects_uncorroborated_or_marker_only_article_gain():
+    source = [{"type": "article", "number": "85", "text": "source"}]
+    uncorroborated = [
+        {"type": "article", "number": "1", "text": "first"},
+        {"type": "article", "number": "2", "text": "second"},
+    ]
+    marker_only = [
+        {"type": "article", "number": "1", "text": "source"},
+        {"type": "article", "number": "2", "text": ""},
+    ]
+
+    assert _merge_pdf_structure_improvements(source, uncorroborated) == (source, ())
+    assert _merge_pdf_structure_improvements(
+        [{"type": "article", "number": "1", "text": "source"}], marker_only,
+    ) == ([{"type": "article", "number": "1", "text": "source"}], ())
 
 
 def test_articles_only_translation_can_improve_extraction():
@@ -276,6 +350,15 @@ def test_pdf_fallback_provenance_is_queryable():
         "pdf_fallback_reason": "timeout",
     })
     assert metadata["content_source"] == "cellar_pdf_eng__pymupdf_timeout"
+
+
+def test_pdf_representation_repair_provenance_is_queryable():
+    metadata = {"content_source": "cellar_pdf_eng"}
+    Pipeline._apply_pdf_provenance(metadata, {
+        "pdf_backend": "docling",
+        "pdf_representation_repair": "pymupdf_articles",
+    })
+    assert metadata["content_source"] == "cellar_pdf_eng__pymupdf_articles"
 
 
 def test_pdf_quality_startup_failure_keeps_primary_html(monkeypatch):

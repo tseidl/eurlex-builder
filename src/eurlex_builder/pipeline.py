@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -60,6 +61,146 @@ def _translated_parse_is_better(
     return bool(comparisons) and all(new >= old for new, old in comparisons) and any(
         new > old for new, old in comparisons
     )
+
+
+def _recital_sequence_is_credible(units: list[dict]) -> bool:
+    numbers = [
+        str(unit.get("number") or "")
+        for unit in units
+        if unit.get("type") == "recital"
+    ]
+    if not numbers or any(not number.isdigit() for number in numbers):
+        return False
+    return [int(number) for number in numbers] == list(range(1, len(numbers) + 1))
+
+
+def _structure_groups(
+    units: list[dict], unit_type: str,
+) -> tuple[list[str], dict[str, list[dict]]]:
+    order: list[str] = []
+    groups: dict[str, list[dict]] = {}
+    for unit in units:
+        if unit.get("type") != unit_type:
+            continue
+        key = str(unit.get("number") or "__unnumbered__").lower()
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(unit)
+    return order, groups
+
+
+def _article_sequence_is_credible(units: list[dict]) -> bool:
+    numbers, _ = _structure_groups(units, "article")
+    if numbers == ["sole"]:
+        return True
+    if not numbers or any(not re.fullmatch(r"\d+[a-z]*", number) for number in numbers):
+        return False
+    bases: list[int] = []
+    for number in numbers:
+        base = int(re.match(r"\d+", number).group())
+        if base not in bases:
+            bases.append(base)
+    return bases == list(range(1, bases[-1] + 1))
+
+
+def _group_has_substantive_content(units: list[dict]) -> bool:
+    value = " ".join(
+        str(unit.get(field) or "")
+        for unit in units
+        for field in ("title", "text")
+    )
+    return sum(character.isalnum() for character in value) >= 3
+
+
+def _merge_missing_structure(
+    source_units: list[dict], pdf_units: list[dict], unit_type: str,
+) -> list[dict] | None:
+    """Add PDF-only identifiers while retaining every source unit verbatim."""
+    _, source_groups = _structure_groups(source_units, unit_type)
+    pdf_order, pdf_groups = _structure_groups(pdf_units, unit_type)
+    source_keys = set(source_groups)
+    pdf_keys = set(pdf_groups)
+    new_keys = pdf_keys - source_keys
+    if not new_keys or not source_keys.issubset(pdf_keys):
+        return None
+    if any(not _group_has_substantive_content(pdf_groups[key]) for key in new_keys):
+        return None
+
+    merged: list[dict] = []
+    for key in pdf_order:
+        merged.extend(source_groups.get(key, pdf_groups[key]))
+    return merged
+
+
+def _merge_pdf_structure_improvements(
+    source_units: list[dict],
+    pdf_units: list[dict],
+    *,
+    include_recitals: bool = True,
+    include_articles: bool = True,
+    include_annexes: bool = True,
+) -> tuple[list[dict], tuple[str, ...]]:
+    """Merge independently improved same-language structures without text loss."""
+    source_profile = dict(zip(
+        ("recital", "article", "annex"), _structure_profile(source_units),
+    ))
+    pdf_profile = dict(zip(
+        ("recital", "article", "annex"), _structure_profile(pdf_units),
+    ))
+    requested = {
+        "recital": include_recitals,
+        "article": include_articles,
+        "annex": include_annexes,
+    }
+    _, source_article_groups = _structure_groups(source_units, "article")
+    _, pdf_article_groups = _structure_groups(pdf_units, "article")
+    articles_corroborated = (
+        not source_article_groups
+        or set(source_article_groups).issubset(pdf_article_groups)
+    )
+
+    improvements: list[str] = []
+    merged_types: dict[str, list[dict]] = {}
+    for unit_type in ("recital", "article", "annex"):
+        if unit_type != "article" and not articles_corroborated:
+            continue
+        if not requested[unit_type] or pdf_profile[unit_type] <= source_profile[unit_type]:
+            continue
+        merged = _merge_missing_structure(source_units, pdf_units, unit_type)
+        if merged is None:
+            continue
+        if unit_type == "recital" and (
+            pdf_profile[unit_type] < 3
+            or not _recital_sequence_is_credible(pdf_units)
+        ):
+            continue
+        if unit_type == "article" and not _article_sequence_is_credible(pdf_units):
+            continue
+        improvements.append(unit_type)
+        merged_types[unit_type] = merged
+
+    if not improvements:
+        return source_units, ()
+
+    selected: dict[str, list[dict]] = {}
+    for unit_type in ("recital", "article", "annex"):
+        selected[unit_type] = merged_types.get(unit_type, [
+            unit for unit in source_units if unit.get("type") == unit_type
+        ])
+
+    other_units = [
+        unit
+        for unit in source_units
+        if unit.get("type") not in {"recital", "article", "annex"}
+    ]
+    merged = [
+        *selected["recital"],
+        *selected["article"],
+        *other_units,
+        *selected["annex"],
+    ]
+    return merged, tuple(improvements)
 
 
 def _should_run_translate_fallback(
@@ -519,6 +660,8 @@ class Pipeline:
             language = fetch_result[2] if fetch_result and len(fetch_result) >= 3 else "eng"
             content_type = fetch_result[1] if fetch_result else ""
             extract_meta: dict = {}
+            if content_type == "pdf":
+                extract_meta["pdf_text_layer"] = full_text
             units = self._extract_units(
                 celex_id, raw_content, text_cfg, language=language,
                 out_metadata=extract_meta,
@@ -564,22 +707,38 @@ class Pipeline:
                             exc,
                         )
                         pdf_units = []
-                    if pdf_units and len(pdf_units) > len(units):
-                        logger.info(
-                            "PDF fallback for %s: %d units (was %d from HTML)",
-                            celex_id, len(pdf_units), len(units),
+                    same_language = pdf_lang == language
+                    merged_units, improved_types = (
+                        _merge_pdf_structure_improvements(
+                            units,
+                            pdf_units,
+                            include_recitals=text_cfg.include_recitals,
+                            include_articles=text_cfg.include_articles,
+                            include_annexes=text_cfg.include_annexes,
                         )
-                        units = pdf_units
-                        language = pdf_lang
+                        if same_language
+                        else (units, ())
+                    )
+                    if improved_types:
+                        html_profile = _structure_profile(units)
+                        adopted_profile = _structure_profile(merged_units)
+                        logger.info(
+                            "PDF structural fallback for %s: profile %s "
+                            "(was %s from HTML; improved %s)",
+                            celex_id,
+                            adopted_profile,
+                            html_profile,
+                            ",".join(improved_types),
+                        )
+                        units = merged_units
                         extract_meta = pdf_meta
-                        metadata["content_source"] = f"cellar_pdf_{pdf_lang}_fallback"
+                        structures = "-".join(improved_types)
+                        metadata["content_source"] = (
+                            f"cellar_html_{language}__pdf_{pdf_lang}_"
+                            f"fallback_{structures}"
+                        )
                         self._apply_pdf_provenance(metadata, pdf_meta)
-                        metadata["language"] = pdf_lang
-                        # Keep full_text consistent with the adopted language —
-                        # otherwise the translation phase would run a
-                        # non-English model over the English HTML text.
-                        metadata["full_text"] = self._extract_full_text(pdf_raw, pdf_result)
-                        metadata["full_text_html"] = None
+                        metadata["language"] = language
 
             # Translate-before-extract fallback for non-English legislative PDFs
             # where the source-language parser produced little or no structural
@@ -744,6 +903,12 @@ class Pipeline:
 
     @staticmethod
     def _apply_pdf_provenance(metadata: dict, extraction_metadata: dict) -> None:
+        representation_repair = extraction_metadata.get("pdf_representation_repair")
+        if representation_repair:
+            content_source = metadata.get("content_source") or "cellar_pdf_unknown"
+            metadata["content_source"] = (
+                f"{content_source}__{representation_repair}"
+            )
         if extraction_metadata.get("pdf_backend") != "pymupdf":
             return
         reason = extraction_metadata.get("pdf_fallback_reason") or "conversion"

@@ -16,8 +16,12 @@ import re
 
 from lxml import etree, html
 
-from eurlex_builder.utils import normalize_string
-from eurlex_builder.extractors.splitter import split_article
+from eurlex_builder.utils import normalize_html_encoding_declaration, normalize_string
+from eurlex_builder.extractors.splitter import (
+    _find_quoted_regions,
+    _is_in_quoted_region,
+    split_article,
+)
 
 logger = logging.getLogger("eurlex_builder")
 
@@ -121,6 +125,7 @@ def _strip_recital_tail(text: str) -> str:
 
 def extract_html_full_text(raw_content: bytes) -> str | None:
     """Extract all visible text from HTML content. Used for full_text column."""
+    raw_content = normalize_html_encoding_declaration(raw_content)
     try:
         tree = etree.fromstring(raw_content)
     except Exception:
@@ -143,6 +148,8 @@ def _extract_full_body(tree) -> str | None:
 
     parts: list[str] = []
     for p in root.iter("{http://www.w3.org/1999/xhtml}p", "p"):
+        if p.xpath(".//*[local-name()='p']"):
+            continue
         cls = p.get("class", "")
         # Skip page headers, banners, and language selectors.
         if cls in ("bglang", "hd-date", "hd-lg", "hd-oj", "hd-ti"):
@@ -195,52 +202,94 @@ def _extract_standard_recitals(tree) -> list[dict]:
 def _extract_table_recitals(tree) -> list[dict]:
     """Extract recitals from table cells where (N) and text are in adjacent <td>s.
 
-    Scans all <table> elements before the first article div, looking for
-    rows where the first cell contains a bare "(N)" pattern.
+    Scans tables before the first operative boundary, looking for rows where
+    the first cell contains a bare "(N)" pattern.
     """
     units: list[dict] = []
     numbered_re = re.compile(r"^\((\d+)\)$")
 
-    # Find the first article div to know where recitals end.
-    first_art = tree.xpath(
-        ".//*[local-name()='div' and starts-with(@id, 'art')]"
-    )
-    first_art_el = first_art[0] if first_art else None
+    elements = list(tree.iter())
+    positions = {element: position for position, element in enumerate(elements)}
+    operative_positions = [
+        positions[element]
+        for element in elements
+        if (
+            isinstance(element.tag, str)
+            and element.tag.rsplit("}", 1)[-1] == "div"
+            and (element.get("id") or "").startswith("art")
+        )
+    ]
+    for element in elements:
+        if not isinstance(element.tag, str):
+            continue
+        if element.tag.rsplit("}", 1)[-1] != "p":
+            continue
+        if element.xpath(".//*[local-name()='p']"):
+            continue
+        text = _extract_text(element).strip()
+        if re.search(
+            r"\b(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b",
+            text,
+            re.IGNORECASE,
+        ) or re.fullmatch(
+            r"(?:Sole\s+)?Article(?!s)(?:\s+\d+[a-z]*)?[.,;:\-–—]?",
+            text,
+            re.IGNORECASE,
+        ):
+            operative_positions.append(positions[element])
+    first_operative_position = min(operative_positions, default=None)
 
     for table in tree.iter("{http://www.w3.org/1999/xhtml}table", "table"):
-        # Stop if we've passed the first article.
-        if first_art_el is not None:
-            # Compare document position: if table comes after the article, stop.
-            # lxml doesn't have a direct position compare, so use a simple heuristic:
-            # check if the table is a descendant or following sibling of art div's parent.
-            try:
-                if table.getparent() != first_art_el.getparent():
-                    # Different parent — check if table's sourceline is after article's
-                    if (table.sourceline or 0) > (first_art_el.sourceline or 0):
-                        break
-            except Exception:
-                pass
+        if (
+            first_operative_position is not None
+            and positions[table] > first_operative_position
+        ):
+            break
 
         rows = table.xpath(".//*[local-name()='tr']")
         for row in rows:
-            cells = row.xpath(".//*[local-name()='td']")
+            cells = row.xpath("./*[local-name()='td']")
             if len(cells) >= 2:
-                first_text = _extract_text(cells[0]).strip()
-                m = numbered_re.match(first_text)
-                if m:
-                    body_text = _extract_text(cells[1])
-                    if body_text:
-                        full = f"({m.group(1)}) {body_text}"
-                        cleaned = _strip_recital_tail(full)
-                        units.append({
-                            "type": "recital",
-                            "subtype": _classify_recital(cleaned),
-                            "number": m.group(1),
-                            "title": None,
-                            "text": cleaned,
-                        })
+                marker_index = next(
+                    (
+                        index
+                        for index, cell in enumerate(cells[:-1])
+                        if numbered_re.match(_extract_text(cell).strip())
+                    ),
+                    None,
+                )
+                if marker_index is None:
+                    continue
+                marker = numbered_re.match(_extract_text(cells[marker_index]).strip())
+                body_text = " ".join(
+                    text
+                    for cell in cells[marker_index + 1 :]
+                    if (text := _extract_text(cell))
+                )
+                if body_text and marker:
+                    full = f"({marker.group(1)}) {body_text}"
+                    cleaned = _strip_recital_tail(full)
+                    units.append({
+                        "type": "recital",
+                        "subtype": _classify_recital(cleaned),
+                        "number": marker.group(1),
+                        "title": None,
+                        "text": cleaned,
+                    })
 
     return units
+
+
+def _table_recital_sequence_is_credible(units: list[dict]) -> bool:
+    numbers = [unit.get("number") for unit in units]
+    return (
+        len(numbers) >= 2
+        and numbers == [str(number) for number in range(1, len(numbers) + 1)]
+        and all(
+            sum(character.isalpha() for character in unit.get("text", "")) >= 3
+            for unit in units
+        )
+    )
 
 
 def _extract_standard_articles(tree, *, granularity: str = "article") -> list[dict]:
@@ -610,7 +659,12 @@ def _extract_class_based_recitals(tree) -> list[dict]:
     return units
 
 
-def _extract_class_based_articles(tree, *, granularity: str = "article") -> list[dict]:
+def _extract_class_based_articles(
+    tree,
+    *,
+    granularity: str = "article",
+    outside_standard_articles: bool = False,
+) -> list[dict]:
     """Extract articles from class-based OJ format.
 
     Articles are <p class="ti-art"> elements; body is following <p class="normal">
@@ -622,6 +676,12 @@ def _extract_class_based_articles(tree, *, granularity: str = "article") -> list
     )
 
     for p in art_paras:
+        if outside_standard_articles and p.xpath(
+            "ancestor::*[local-name()='div' and "
+            "re:test(@id, '^art(_[0-9]+[a-z]*)?$')]",
+            namespaces=NSMAP,
+        ):
+            continue
         title_text = _extract_text(p)
         number = None
         m = re.search(r"Article\s+(\d+[a-z]*)", title_text, re.IGNORECASE)
@@ -915,6 +975,10 @@ def _looks_like_article_title(text: str) -> bool:
         return False
     if t[-1] in ":;,-":
         return False
+    if re.match(
+        r"^This\s+(?:Regulation|Decision|Directive)\b", t, re.IGNORECASE,
+    ) or re.search(r"\bshall\b", t, re.IGNORECASE):
+        return False
     return t[0].isupper()
 
 
@@ -954,15 +1018,20 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
             return units
         root = text_div[0]
 
-    paragraphs = root.xpath(".//*[local-name()='p']")
+    paragraphs = root.xpath(
+        ".//*[local-name()='p' and not(.//*[local-name()='p'])]"
+    )
 
     recital_counter = 0
     in_recital_zone = False  # True after seeing "Whereas:" marker
+    last_numbered_recital: int | None = None
+    current_recital: dict | None = None
     current_article: dict | None = None
     current_annex: dict | None = None
 
     # Pattern for modern numbered recitals: "(1) ...", "(2) ...", etc.
     numbered_recital_re = re.compile(r"^\((\d+)\)\s*(.*)")
+    plain_numbered_recital_re = re.compile(r"^(\d{1,3})\s+(.+)")
 
     # Pre-process: some older EUR-Lex documents cram article headings into
     # the same <p> as preceding text (e.g., "HAS ADOPTED THIS REGULATION:
@@ -973,18 +1042,46 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
     _mid_article_re = re.compile(
         r"(?<=[:.;)])\s+((?:Sole\s+)?Article(?!s)(?:\s+\d+[a-z]*)?)\s*$", re.IGNORECASE
     )
+    quoted_article_boundary_re = re.compile(
+        r"(?<=['’”»])\s+(?=(?i:(?:Sole\s+)?Article(?!s)\s+\d+[a-z]*)\s+"
+        r"[A-ZÀ-Þ'‘\"“])",
+    )
+    inline_boundary_re = re.compile(
+        r"(?<=[,;:.])\s+(?=(?:Whereas\b|"
+        r"(?i:(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b)))"
+    )
     raw_texts: list[str] = []
     for p in paragraphs:
         text = _extract_text(p)
         if not text:
             continue
-        # Split if "Article N" appears at the end after a non-article prefix.
-        m = _mid_article_re.search(text)
-        if m and len(text) > len(m.group(0)) + 5:
-            raw_texts.append(text[:m.start()].strip())
-            raw_texts.append(m.group(1).strip())
-        else:
-            raw_texts.append(text)
+        for quoted_segment in quoted_article_boundary_re.split(text):
+            for segment in inline_boundary_re.split(quoted_segment):
+                m = _mid_article_re.search(segment)
+                if m and len(segment) > len(m.group(0)) + 5:
+                    raw_texts.append(segment[:m.start()].strip())
+                    raw_texts.append(m.group(1).strip())
+                else:
+                    raw_texts.append(segment)
+
+    raw_text = "\n".join(raw_texts)
+    quoted_regions = _find_quoted_regions(raw_text)
+    raw_offsets: list[int] = []
+    offset = 0
+    for text in raw_texts:
+        raw_offsets.append(offset)
+        offset += len(text) + 1
+
+    marker_only_re = re.compile(r"^\(\d+\)\s*$")
+    marker_run_indexes: set[int] = set()
+    marker_run: list[int] = []
+    for index, text in enumerate([*raw_texts, ""]):
+        if marker_only_re.match(text):
+            marker_run.append(index)
+            continue
+        if len(marker_run) > 1:
+            marker_run_indexes.update(marker_run)
+        marker_run = []
 
     # "Done at <city>, <date>" signals the end of legislative content. Anything
     # after (annex reference lists, archival footnotes) is noise for our
@@ -992,6 +1089,7 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
     _signature_re = re.compile(r"^Done at \w+[,\s]+\d", re.IGNORECASE)
     past_signature = False
     skip_next_caps = False
+    seen_enacting_formula = False
 
     def _start_annex(match: re.Match) -> dict:
         return {
@@ -1001,6 +1099,35 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
             "text": "",
             "_body": [],
         }
+
+    def _start_current_recital(match: re.Match) -> None:
+        nonlocal current_recital, last_numbered_recital
+        current_recital = {
+            "number": match.group(1),
+            "_body": [],
+        }
+        last_numbered_recital = int(match.group(1))
+        remainder = match.group(2).strip()
+        if remainder:
+            current_recital["_body"].append(remainder)
+
+    def _flush_current_recital() -> None:
+        nonlocal current_recital
+        if current_recital is None:
+            return
+        body = " ".join(current_recital["_body"]).strip()
+        if include_recitals and sum(character.isalpha() for character in body) >= 3:
+            text = _strip_recital_tail(
+                f"({current_recital['number']}) {body}"
+            )
+            units.append({
+                "type": "recital",
+                "subtype": _classify_recital(text),
+                "number": current_recital["number"],
+                "title": None,
+                "text": text,
+            })
+        current_recital = None
 
     def _flush_current_article() -> None:
         nonlocal current_article
@@ -1057,6 +1184,7 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
             continue
 
         if _signature_re.match(text):
+            _flush_current_recital()
             past_signature = True
             # Append the signature line itself to the last article/annex once,
             # so strip_boilerplate can find and trim it cleanly.
@@ -1083,12 +1211,26 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
             continue
         skip_next_caps = False
 
+        is_enacting_formula = bool(re.match(
+            r"^(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b", text,
+            re.IGNORECASE,
+        ))
+        if is_enacting_formula:
+            _flush_current_recital()
+            in_recital_zone = False
+            seen_enacting_formula = True
+
         # Only match Article/ANNEX as section headings, not inline references.
         # A heading like "ARTICLE 1" or "Article 3 Subject matter" is short and
         # doesn't continue with legislative prose. Inline references like
         # "Article 2(2) of Regulation (EC)..." or "Annex I to Directive..."
         # are longer and contain prepositions/conjunctions after the number.
         art_match = re.match(r"^(?:Sole\s+)?Article(?!s)(?:\s+(\d+[a-z]*))?", text, re.IGNORECASE)
+        if (
+            art_match
+            and _is_in_quoted_region(raw_offsets[idx], quoted_regions)
+        ):
+            art_match = None
         if art_match:
             after = text[art_match.end():].strip()
             # Reject bare "Article" (no number AND not "Sole Article" prefix).
@@ -1101,8 +1243,16 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
             elif after and re.match(r"^[.,;:\-–—\|]+$", after):
                 after = ""
             # If text after "Article N" looks like a sentence continuation.
-            if art_match and after and re.match(r"(?:\([a-z0-9]+\)|of |to |the |is |shall |and |in |for |or |which |has |was |provides |referred |,)", after, re.IGNORECASE):
-                art_match = None
+            if art_match and after and re.match(
+                r"(?:\([a-z0-9]+\)|of |to |the |is |shall |and |in |for |or |which |has |was |provides |referred |,)",
+                after,
+                re.IGNORECASE,
+            ):
+                if not (
+                    seen_enacting_formula
+                    and after[0].isupper()
+                ):
+                    art_match = None
             # If standalone "Article N" but next paragraph continues the sentence
             # (starts with lowercase or "thereof" or opening paren+digit), it's inline.
             elif art_match and not after:
@@ -1122,6 +1272,7 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
 
         if art_match:
             in_recital_zone = False
+            _flush_current_recital()
             _flush_current_article()
             _flush_current_annex()
 
@@ -1140,6 +1291,7 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
 
         elif annex_match:
             in_recital_zone = False
+            _flush_current_recital()
             _flush_current_article()
             _flush_current_annex()
             current_annex = _start_annex(annex_match)
@@ -1159,24 +1311,54 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
 
         elif text.strip().rstrip(":").upper() == "WHEREAS":
             # "Whereas:" marker — enter modern numbered recital zone.
+            _flush_current_recital()
             in_recital_zone = True
+            last_numbered_recital = None
 
         elif in_recital_zone:
             # Modern style: numbered recitals after "Whereas:"
             num_match = numbered_recital_re.match(text)
-            if num_match and include_recitals:
+            plain_match = plain_numbered_recital_re.match(text)
+            if plain_match:
+                plain_body = plain_match.group(2).lstrip("'\"‘’“”([")
+                if not plain_body or not (
+                    plain_body[0].isupper()
+                    or re.match(r"^\d+(?:\.\d+)*\.\s+\S", plain_body)
+                ) or re.match(
+                    r"^(?:January|February|March|April|May|June|July|August|"
+                    r"September|October|November|December)\b",
+                    plain_body,
+                    re.IGNORECASE,
+                ):
+                    plain_match = None
+            if (
+                num_match
+                and idx not in marker_run_indexes
+                and (
+                    last_numbered_recital is None
+                    or int(num_match.group(1)) > last_numbered_recital
+                )
+            ):
                 # Skip footnote refs ("(1) OJ No 13, ...") and inline
                 # cross-refs ("(3) of the Treaty.") that look numbered.
                 if _FOOTNOTE_REF_RE.match(text) or _INLINE_REF_START_RE.match(text):
                     continue
-                cleaned = _strip_recital_tail(text)
-                units.append({
-                    "type": "recital",
-                    "subtype": _classify_recital(cleaned),
-                    "number": num_match.group(1),
-                    "title": None,
-                    "text": cleaned,
-                })
+                _flush_current_recital()
+                _start_current_recital(num_match)
+            elif (
+                plain_match
+                and (
+                    (last_numbered_recital is None and int(plain_match.group(1)) == 1)
+                    or (
+                        last_numbered_recital is not None
+                        and int(plain_match.group(1)) == last_numbered_recital + 1
+                    )
+                )
+            ):
+                _flush_current_recital()
+                _start_current_recital(plain_match)
+            elif current_recital is not None:
+                current_recital["_body"].append(text)
 
         elif (
             (num_match := numbered_recital_re.match(text))
@@ -1185,15 +1367,8 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
             # Numbered recital with "Whereas" but no prior "Whereas:" marker.
             # E.g. "(1) Whereas within the framework..."
             in_recital_zone = True
-            if include_recitals:
-                cleaned = _strip_recital_tail(text)
-                units.append({
-                    "type": "recital",
-                    "subtype": _classify_recital(cleaned),
-                    "number": num_match.group(1),
-                    "title": None,
-                    "text": cleaned,
-                })
+            _flush_current_recital()
+            _start_current_recital(num_match)
 
         elif re.match(r"^\d+\.\s+Whereas\b", text, re.IGNORECASE):
             # Numbered "N. Whereas" format (e.g. "7. Whereas the competent...")
@@ -1236,17 +1411,11 @@ def _extract_text_only(tree, *, include_recitals: bool, include_articles: bool,
                 if _FOOTNOTE_REF_RE.match(text) or _INLINE_REF_START_RE.match(text):
                     continue
                 in_recital_zone = True
-                if include_recitals:
-                    cleaned = _strip_recital_tail(text)
-                    units.append({
-                        "type": "recital",
-                        "subtype": _classify_recital(cleaned),
-                        "number": num_match.group(1),
-                        "title": None,
-                        "text": cleaned,
-                    })
+                _flush_current_recital()
+                _start_current_recital(num_match)
 
-    # Flush trailing article/annex.
+    # Flush trailing recital/article/annex.
+    _flush_current_recital()
     _flush_current_article()
     _flush_current_annex()
 
@@ -1770,6 +1939,11 @@ class HtmlExtractor:
             units.extend(_extract_standard_recitals(tree))
         if inc_art:
             units.extend(_extract_standard_articles(tree, granularity=granularity))
+            units.extend(_extract_class_based_articles(
+                tree,
+                granularity=granularity,
+                outside_standard_articles=True,
+            ))
         if inc_anx:
             units.extend(_extract_standard_annexes(tree))
         return units
@@ -1820,6 +1994,7 @@ class HtmlExtractor:
         raw_content: bytes,
     ) -> list[dict]:
         """Extract paragraph-level text units from a COM/communication document."""
+        raw_content = normalize_html_encoding_declaration(raw_content)
         tree = None
         try:
             tree = etree.fromstring(raw_content)
@@ -1876,6 +2051,7 @@ class HtmlExtractor:
         out_metadata: dict | None = None,  # ditto — HTML extractor doesn't populate
     ) -> list[dict]:
         """Parse HTML and extract structured text units."""
+        raw_content = normalize_html_encoding_declaration(raw_content)
         units: list[dict] = []
 
         # Try XHTML first, fall back to plain HTML.
@@ -1924,14 +2100,36 @@ class HtmlExtractor:
         if not units:
             body = tree.xpath(".//*[local-name()='body']")
             if body:
-                units = _extract_text_only(
+                table_recitals = (
+                    _extract_table_recitals(tree) if include_recitals else []
+                )
+                credible_table_recitals = _table_recital_sequence_is_credible(
+                    table_recitals
+                )
+                text_units = _extract_text_only(
                     tree,
-                    include_recitals=include_recitals,
+                    include_recitals=(
+                        include_recitals and not credible_table_recitals
+                    ),
                     include_articles=include_articles,
                     include_annexes=include_annexes,
                     article_granularity=article_granularity,
                     container=body[0],
                 )
+                if not credible_table_recitals:
+                    text_recitals = any(
+                        unit.get("type") == "recital" for unit in text_units
+                    )
+                    isolated_substantive = (
+                        len(table_recitals) == 1
+                        and sum(
+                            character.isalpha()
+                            for character in table_recitals[0].get("text", "")
+                        ) >= 3
+                    )
+                    if text_recitals or not isolated_substantive:
+                        table_recitals = []
+                units = table_recitals + text_units
                 if units:
                     logger.debug(
                         "Used text-only fallback on body for %s", celex_id,

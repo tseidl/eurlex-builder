@@ -61,6 +61,15 @@ def normalize_string(text: str) -> str:
     return text.strip()
 
 
+def normalize_html_encoding_declaration(raw_content: bytes) -> bytes:
+    """Map EUR-Lex's legacy UTF-8 alias to the name understood by libxml2."""
+    return re.sub(
+        br"(?i)(charset\s*=\s*[\"']?)UNICODE-1-1-UTF-8",
+        br"\1UTF-8",
+        raw_content,
+    )
+
+
 def extract_type_code(celex_id: str) -> str:
     """Extract the document type code from a CELEX ID (e.g. 'R', 'L', 'D', 'DC')."""
     try:

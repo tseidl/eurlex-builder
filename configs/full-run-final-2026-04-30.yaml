@@ -1,0 +1,40 @@
+# Clean release rebuild for the corpus cutoff of 2026-04-30.
+
+metadata:
+  project_name: "EU Legislative Corpus 1979-2026"
+  author: "Timo Seidl"
+  description: "EU regulations, directives, decisions, and communications from 1979 through 30 April 2026."
+  date_created: 2026-07-17
+  version: "2026-07-17"
+
+data:
+  mode: "descriptive"
+  document_types:
+    - "regulation"
+    - "directive"
+    - "decision"
+    - "communication"
+  start_date: 1979-01-01
+  end_date: 2026-04-30
+
+processing:
+  automated_mode: true
+  text_extraction:
+    include_recitals: true
+    include_articles: true
+    include_annexes: true
+    strip_boilerplate: true
+    article_granularity: paragraph
+  translation:
+    translate_full_text: true
+    translate_text_units: true
+    max_full_text_chars: 100000
+  include_relations: true
+  fetch_original_relations_for_consolidated: true
+  parallel: true
+  max_workers: 4
+
+output:
+  formats:
+    - "parquet"
+  output_directory: "./output/full-run-final-2026-04-30"

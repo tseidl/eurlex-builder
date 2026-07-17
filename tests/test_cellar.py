@@ -7,7 +7,11 @@ import requests
 from datetime import date
 
 from eurlex_builder.errors import TransientSourceError
-from eurlex_builder.sources.cellar import CellarSource, DISCOVERY_TIMEOUT, HTML_ACCEPT
+from eurlex_builder.sources.cellar import (
+    CellarSource,
+    DISCOVERY_TIMEOUT,
+    HTML_ACCEPT,
+)
 
 # Minimal HTTP 300 Multiple Choices page with one selectable candidate.
 _CHOICE_PAGE = b"""<html><body><ul>
@@ -74,6 +78,24 @@ def test_content_fetch_negotiates_xhtml_and_html_in_one_request():
     assert result[1:] == ("html", "eng")
     assert len(session.requests) == 1
     assert session.requests[0][1]["Accept"] == HTML_ACCEPT
+
+
+def test_content_fetch_does_not_switch_sources_on_identifier_text_alone(monkeypatch):
+    wrong_html = b"""<html><body><div id="TexteOnly">
+<p>COMMISSION DECISION concerning another measure (85/379/EEC)</p>
+</div></body></html>"""
+    src = _source_with([_FakeResponse(200, wrong_html)])
+    monkeypatch.setattr(
+        src,
+        "_fetch_pdf_for_lang",
+        lambda celex_id, lang: (b"%PDF-correct", "pdf", lang),
+    )
+
+    result = src.fetch_content("31982D0379")
+
+    assert result is not None
+    assert result[1:] == ("html", "eng")
+    assert b"85/379/EEC" in result[0]
 
 
 def test_request_exception_is_transient():

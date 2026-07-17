@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import IO, Literal
 
 from eurlex_builder.errors import DoclingStartupError
-from eurlex_builder.extractors.splitter import split_article
+from eurlex_builder.extractors.splitter import (
+    _find_quoted_regions,
+    _is_in_quoted_region,
+    split_article,
+)
+from eurlex_builder.utils import strip_boilerplate
 
 logger = logging.getLogger("eurlex_builder")
 
@@ -34,6 +39,7 @@ _WORKER_START_TIMEOUT = 180
 _DOCLING_SIZE_LIMIT = 50 * 1024 * 1024
 _WORKER_JOIN_TIMEOUT = 5
 _CONTROL_MESSAGE_LIMIT = 1024 * 1024
+_FORCED_OUTER_ARTICLE = "\ue000outer-article:"
 
 _FailureReason = Literal[
     "timeout",
@@ -544,6 +550,198 @@ def extract_pdf_markdown(
         Path(pdf_path).unlink(missing_ok=True)
 
 
+def _distinct_article_numbers(units: list[dict]) -> list[str]:
+    numbers: list[str] = []
+    for unit in units:
+        if unit.get("type") != "article":
+            continue
+        number = str(unit.get("number") or "").lower()
+        if number and number not in numbers:
+            numbers.append(number)
+    return numbers
+
+
+def _article_sequence_is_complete(units: list[dict]) -> bool:
+    numbers = _distinct_article_numbers(units)
+    if numbers == ["sole"]:
+        return True
+    if not numbers or any(not re.fullmatch(r"\d+[a-z]*", number) for number in numbers):
+        return False
+    bases: list[int] = []
+    for number in numbers:
+        base = int(re.match(r"\d+", number).group())
+        if base not in bases:
+            bases.append(base)
+    return bases == list(range(1, bases[-1] + 1))
+
+
+def _normalize_cyclic_numeric_article_numbers(numbers: list[str]) -> list[str]:
+    """Normalize a two-column text-layer sequence only when it is one rotation."""
+    if len(numbers) < 2 or any(not number.isdigit() for number in numbers):
+        return numbers
+    expected = [str(number) for number in range(1, len(numbers) + 1)]
+    if set(numbers) != set(expected) or "1" not in numbers:
+        return numbers
+    pivot = numbers.index("1")
+    rotated = numbers[pivot:] + numbers[:pivot]
+    return expected if rotated == expected else numbers
+
+
+def _article_group_is_substantive(units: list[dict]) -> bool:
+    content = " ".join(
+        f"{unit.get('title') or ''} "
+        f"{strip_boilerplate(_clean_pdf_artifacts(unit.get('text') or ''))}"
+        for unit in units
+    )
+    return sum(character.isalnum() for character in content) >= 3
+
+
+_RECOVERED_PREAMBLE_RE = re.compile(
+    r"\bTHE\s+(?:(?:EUROPEAN\s+)?COMMISSION|COUNCIL|"
+    r"EUROPEAN\s+PARLIAMENT(?:\s+AND\s+THE\s+COUNCIL)?)"
+    r"(?:\s+OF\s+THE\s+EUROPEAN\s+(?:COMMUNITIES|COMMUNITY|UNION))?\s*,"
+    r"(?=\s+Having\s+regard)"
+    r"|\bHaving\s+regard\s+to\b"
+    r"|\bWhereas\b",
+)
+_RECOVERED_PAGE_HEADER_RE = re.compile(
+    r"\s+(?:(?:No\s+[LC]\s*\d+\s*/?\s*\d*)|(?:\d{1,2}\.\s*\d{2,4}))"
+    r"\s+(?:EN\s+)?Official\s+Journal\s+of\s+the\s+European\s+Communities\b.*$",
+    re.DOTALL,
+)
+_RECOVERED_LEADING_PAGE_HEADER_RE = re.compile(
+    r"^(?:(?:(?:No\s+[LC]\s*\d+\s*/?\s*\d*)|"
+    r"(?:\d{1,2}\.\s*\d{2,4}))\s+(?:EN\s+)?|EN\s+)?"
+    r"Official\s+Journal\s+of\s+the\s+European\s+Communities\b(?P<tail>.*)$",
+    re.DOTALL,
+)
+_RECOVERED_OJ_REFERENCE_RE = re.compile(
+    r"^[^A-Za-z]*(?:[fO0]\d*\)?\s+)?OJ\s+(?:No\s+)?[LC]\s*\d",
+    re.IGNORECASE,
+)
+_RECOVERED_INLINE_OJ_REFERENCE_RE = re.compile(
+    r"\s+(?:\([^)]{0,4}?\)?|\[[^\]]{0,4}?\]?|[fO0]\d*\)?)"
+    r"\s*OJ\s+(?:No\s+)?[LC]\s*\d",
+    re.IGNORECASE,
+)
+_RECOVERED_DATE_FRAGMENT_RE = re.compile(
+    r"^(?:(?:\d{1,2}\s*\.\s*)?\d{2,4}\s*,?\s*=*\s*p\.?(?:\s*\d+)?|"
+    r"\d{1,2}\s*\.\s*\d{2,4}|\d{4}\s*\.)$",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_recovered_article_group(units: list[dict]) -> list[dict]:
+    sanitized: list[dict] = []
+    for unit in units:
+        text = _clean_pdf_artifacts(unit.get("text") or "")
+        preamble = _RECOVERED_PREAMBLE_RE.search(text)
+        if preamble:
+            text = text[:preamble.start()].rstrip()
+        leading_header = _RECOVERED_LEADING_PAGE_HEADER_RE.match(text)
+        if leading_header:
+            text = re.sub(
+                r"^(?:No\s+[LC]\s*\d+\s*/?\s*\d*|[LC]\s*\d+\s*/\s*\d+)\s*",
+                "",
+                leading_header.group("tail").strip(),
+            )
+        text = _RECOVERED_PAGE_HEADER_RE.sub("", text).strip()
+        inline_oj = _RECOVERED_INLINE_OJ_REFERENCE_RE.search(text)
+        if (
+            inline_oj
+            and sum(character.isalnum() for character in text[:inline_oj.start()]) >= 3
+        ):
+            text = text[:inline_oj.start()].rstrip()
+        text = re.sub(
+            r"(?<=\.)\s+No\s+[LC]\s*\d+(?:/\d+)?\s*$", "", text,
+        ).strip()
+        if (
+            len(text) <= 160
+            and _RECOVERED_OJ_REFERENCE_RE.match(text)
+        ) or _RECOVERED_DATE_FRAGMENT_RE.fullmatch(text):
+            text = ""
+        if not text and not unit.get("title"):
+            continue
+        cleaned = dict(unit)
+        cleaned["text"] = text
+        sanitized.append(cleaned)
+    return sanitized
+
+
+def _merge_complete_pymupdf_articles(
+    docling_units: list[dict],
+    pymupdf_units: list[dict],
+) -> tuple[list[dict], bool]:
+    """Add a strict, complete text-layer superset while retaining Docling units."""
+    raw_pymupdf_numbers = _distinct_article_numbers(pymupdf_units)
+    pymupdf_groups = {
+        number: _sanitize_recovered_article_group([
+            unit
+            for unit in pymupdf_units
+            if unit.get("type") == "article"
+            and str(unit.get("number") or "").lower() == number
+        ])
+        for number in raw_pymupdf_numbers
+    }
+    raw_docling_numbers = _distinct_article_numbers(docling_units)
+    docling_groups = {
+        number: [
+            unit for unit in docling_units
+            if unit.get("type") == "article"
+            and str(unit.get("number") or "").lower() == number
+        ]
+        for number in raw_docling_numbers
+    }
+    docling_numbers = [
+        number for number in raw_docling_numbers
+        if _article_group_is_substantive(docling_groups[number])
+    ]
+    pymupdf_numbers = _normalize_cyclic_numeric_article_numbers(
+        [
+            number for number in raw_pymupdf_numbers
+            if (
+                _article_group_is_substantive(pymupdf_groups[number])
+                or number in docling_numbers
+            )
+        ],
+    )
+    pymupdf_sequence = [
+        {"type": "article", "number": number}
+        for number in pymupdf_numbers
+    ]
+    if not _article_sequence_is_complete(pymupdf_sequence):
+        return docling_units, False
+    if len(pymupdf_numbers) <= len(docling_numbers):
+        return docling_units, False
+    if not set(docling_numbers).issubset(pymupdf_numbers):
+        return docling_units, False
+
+    new_numbers = set(pymupdf_numbers) - set(docling_numbers)
+    if any(
+        not _article_group_is_substantive(pymupdf_groups[number])
+        for number in new_numbers
+    ):
+        return docling_units, False
+
+    recitals = [unit for unit in docling_units if unit.get("type") == "recital"]
+    articles = [
+        unit
+        for number in pymupdf_numbers
+        for unit in (
+            docling_groups[number]
+            if number in docling_numbers
+            else pymupdf_groups[number]
+        )
+    ]
+    other = [
+        unit
+        for unit in docling_units
+        if unit.get("type") not in {"recital", "article", "annex"}
+    ]
+    annexes = [unit for unit in docling_units if unit.get("type") == "annex"]
+    return [*recitals, *articles, *other, *annexes], True
+
+
 class PdfExtractor:
     """Extracts text from PDF documents using Docling."""
 
@@ -586,6 +784,35 @@ class PdfExtractor:
             include_annexes=include_annexes,
             article_granularity=article_granularity,
         )
+
+        if (
+            include_articles
+            and out_metadata is not None
+            and out_metadata.get("pdf_backend") == "docling"
+        ):
+            pymupdf_text = (
+                out_metadata.get("pdf_text_layer")
+                if "pdf_text_layer" in out_metadata
+                else extract_pdf_full_text(raw_content)
+            )
+            if pymupdf_text:
+                pymupdf_units = _parse_legislative_markdown(
+                    pymupdf_text,
+                    include_recitals=include_recitals,
+                    include_articles=include_articles,
+                    include_annexes=include_annexes,
+                    article_granularity=article_granularity,
+                )
+                units, repaired = _merge_complete_pymupdf_articles(
+                    units, pymupdf_units,
+                )
+                if repaired:
+                    out_metadata["pdf_representation_repair"] = "pymupdf_articles"
+                    logger.info(
+                        "Recovered a complete article sequence for %s from "
+                        "the PDF text layer",
+                        celex_id,
+                    )
 
         # Clean up: trim OJ references, signatures, and page headers from units.
         for unit in units:
@@ -647,6 +874,428 @@ def _pdf_strip_recital_tail(text: str) -> str:
     return _PDF_RECITAL_TAIL_OJ_RE.sub("", text).rstrip()
 
 
+def _repair_interleaved_article_markers(lines: list[str]) -> list[str]:
+    """Move outer article markers that Docling interleaved into a long table."""
+    marker_re = re.compile(
+        r"^(?P<prefix>.+?)\s+Article\s+(?P<first>\d+[a-z]*)\s+"
+        r"(?P<body>This\s+(?P<kind>Decision|Regulation|Directive)\s+shall\b.+?)\s+"
+        r"Article\s+(?P<second>\d+[a-z]*)\s*$",
+        re.IGNORECASE,
+    )
+    for index, line in enumerate(lines):
+        match = marker_re.match(line.strip())
+        if not match:
+            continue
+        body_start_re = re.compile(
+            rf"^This\s+{re.escape(match.group('kind'))}\s+shall\s+be\s+published\b",
+            re.IGNORECASE,
+        )
+        body_index = next(
+            (
+                later_index
+                for later_index, later in enumerate(lines[index + 1 :], index + 1)
+                if body_start_re.match(later.strip())
+            ),
+            None,
+        )
+        if body_index is None:
+            continue
+        repaired = list(lines)
+        repaired[index] = match.group("prefix")
+        repaired[body_index:body_index] = [
+            f"{_FORCED_OUTER_ARTICLE}Article {match.group('first')}",
+            match.group("body"),
+            f"{_FORCED_OUTER_ARTICLE}Article {match.group('second')}",
+        ]
+        return repaired
+    return lines
+
+
+def _repair_embedded_operative_markers(lines: list[str]) -> list[str]:
+    """Split enacting formulae and operative headings flattened onto one line."""
+    joined = "\n".join(lines)
+    quoted_regions = _find_quoted_regions(joined)
+    line_offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        line_offsets.append(offset)
+        offset += len(line) + 1
+
+    formula_re = re.compile(
+        r"\b(?P<formula>(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)"
+        r"(?:\s+THIS\s+\w+|\s+AS\s+FOLLOWS)?\s*:?)",
+        re.IGNORECASE,
+    )
+    article_re = re.compile(
+        r"(?<!\w)((?i:(?:Sole\s+)?Article)\s+\d+[a-zA-Z]*)"
+        r"(?=\s+(?:[-–—一]\s*)?[A-ZÀ-Þ'‘\"“])",
+    )
+    trailing_article_re = re.compile(
+        r"(?<!\w)(?P<heading>(?i:(?:Sole\s+)?Article)\s+"
+        r"(?P<number>\d+)[a-zA-Z]*)\s*$",
+    )
+    final_article_body_re = re.compile(
+        r"^This\s+(?:Regulation|Decision|Directive)\s+shall\b",
+        re.IGNORECASE,
+    )
+    operative_boundary_re = re.compile(
+        r"^(?:#{0,3}\s*ANNEX\b|Done\s+at\b|For\s+(?:the\s+)?"
+        r"(?:Commission|Council)\b|The\s+President\b)",
+        re.IGNORECASE,
+    )
+    repaired: list[str] = []
+    seen_formula = False
+    pending_initial_article_tail: str | None = None
+
+    def _split_articles(
+        value: str,
+        *,
+        value_offset: int,
+        include_trailing: bool = False,
+    ) -> list[tuple[str, bool]]:
+        matches = [
+            match for match in article_re.finditer(value)
+            if (
+                not value[:match.start()].rstrip()
+                or value[:match.start()].rstrip()[-1] in ":.;|!?"
+            )
+            if not _is_in_quoted_region(
+                value_offset + match.start(), quoted_regions,
+            )
+        ]
+        if include_trailing:
+            trailing = trailing_article_re.search(value)
+            if (
+                trailing
+                and not _is_in_quoted_region(
+                    value_offset + trailing.start(), quoted_regions,
+                )
+                and not any(
+                    trailing.start() < match.end() and match.start() < trailing.end()
+                    for match in matches
+                )
+            ):
+                matches.append(trailing)
+                matches.sort(key=lambda match: match.start())
+        if not matches:
+            return [(value, False)]
+        parts: list[tuple[str, bool]] = []
+        prefix = value[:matches[0].start()].strip()
+        if prefix:
+            parts.append((prefix, False))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+            part = value[match.start():end].strip()
+            if part:
+                parts.append((part, True))
+        return parts
+
+    def _append_parts(parts: list[tuple[str, bool]]) -> None:
+        nonlocal pending_initial_article_tail
+        for part, starts_article in parts:
+            if starts_article and pending_initial_article_tail:
+                repaired.append(pending_initial_article_tail)
+                pending_initial_article_tail = None
+            repaired.append(part)
+
+    for line_index, line in enumerate(lines):
+        if line.startswith(_FORCED_OUTER_ARTICLE):
+            repaired.append(line)
+            continue
+        next_text = next(
+            (
+                candidate.strip()
+                for candidate in lines[line_index + 1 :]
+                if candidate.strip()
+            ),
+            "",
+        )
+        formula = next(
+            (
+                match for match in formula_re.finditer(line)
+                if not _is_in_quoted_region(
+                    line_offsets[line_index] + match.start(), quoted_regions,
+                )
+            ),
+            None,
+        )
+        if formula:
+            if pending_initial_article_tail:
+                repaired.append(pending_initial_article_tail)
+                pending_initial_article_tail = None
+            prefix = line[:formula.start()].strip()
+            if prefix:
+                repaired.append(prefix)
+            repaired.append(formula.group("formula").strip())
+            raw_suffix = line[formula.end():]
+            leading = len(raw_suffix) - len(raw_suffix.lstrip())
+            suffix = raw_suffix.strip()
+            suffix_offset = line_offsets[line_index] + formula.end() + leading
+            if suffix:
+                trailing = trailing_article_re.search(suffix)
+                if (
+                    trailing
+                    and trailing.group("number") == "1"
+                    and not _is_in_quoted_region(
+                        suffix_offset + trailing.start(), quoted_regions,
+                    )
+                ):
+                    displaced_tail = suffix[:trailing.start()].strip()
+                    repaired.append(trailing.group("heading"))
+                    pending_initial_article_tail = displaced_tail or None
+                else:
+                    _append_parts(_split_articles(
+                        suffix,
+                        value_offset=suffix_offset,
+                        include_trailing=bool(final_article_body_re.match(next_text)),
+                    ))
+            seen_formula = True
+        elif seen_formula:
+            if (
+                pending_initial_article_tail
+                and operative_boundary_re.match(line.strip())
+            ):
+                repaired.append(pending_initial_article_tail)
+                pending_initial_article_tail = None
+            leading = len(line) - len(line.lstrip())
+            value = line.strip()
+            _append_parts(_split_articles(
+                value,
+                value_offset=line_offsets[line_index] + leading,
+                include_trailing=bool(final_article_body_re.match(next_text)),
+            ))
+        else:
+            repaired.append(line)
+    if pending_initial_article_tail:
+        repaired.append(pending_initial_article_tail)
+    return repaired
+
+
+def _repair_displaced_operative_block(lines: list[str]) -> list[str]:
+    """Move an operative block that Docling placed after the signature."""
+    signature_re = re.compile(r"^Done at \w+[,\s]+\d", re.IGNORECASE)
+    formula_re = re.compile(
+        r"^(?:#{1,3}\s+)?(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b",
+        re.IGNORECASE,
+    )
+    article_heading_re = re.compile(
+        r"^(?:#{1,3}\s+)?(?:Sole\s+)?Article(?!s)(?:\s+\d+[a-z]*)?\s*$",
+        re.IGNORECASE,
+    )
+    annex_re = re.compile(r"^#{1,3}\s+ANNEX\b", re.IGNORECASE)
+    signatory_re = re.compile(
+        r"^(?:For\s+(?:the\s+)?(?:Commission|Council)|The\s+President)\b",
+        re.IGNORECASE,
+    )
+    signature_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if signature_re.match(line.strip())
+            and any(
+                formula_re.match(later.strip())
+                or article_heading_re.match(later.strip())
+                for later in lines[index + 1 :]
+            )
+        ),
+        None,
+    )
+    if signature_index is None:
+        return lines
+
+    formula_index = next(
+        (
+            index
+            for index, line in enumerate(lines[signature_index + 1 :], signature_index + 1)
+            if formula_re.match(line.strip())
+        ),
+        None,
+    )
+    instrument_re = re.compile(
+        r"\b(?:AGREEMENT|PROTOCOL|CONVENTION|RESOLUTION|ARRANGEMENT|"
+        r"EXCHANGE\s+OF\s+LETTERS|MEMORANDUM(?:\s+OF\s+UNDERSTANDING)?)\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_attachment_boundary(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        if re.match(r"^#{1,3}\s+\S", stripped):
+            return True
+        if instrument_re.search(stripped):
+            return True
+        letters = [character for character in stripped if character.isalpha()]
+        if (
+            len(stripped) <= 240
+            and len(letters) >= 4
+            and sum(character.isupper() for character in letters) / len(letters) >= 0.8
+        ):
+            return True
+        words = re.findall(r"[^\W\d_]+", stripped, re.UNICODE)
+        connectors = {
+            "and", "between", "by", "concerning", "for", "in", "of",
+            "on", "the", "to", "with",
+        }
+        return (
+            len(stripped) <= 240
+            and 2 <= len(words) <= 20
+            and stripped[-1] not in ".,;:"
+            and all(
+                word.casefold() in connectors
+                or word.isupper()
+                or word[:1].isupper()
+                for word in words
+            )
+        )
+
+    if formula_index is not None and any(
+        _looks_like_attachment_boundary(line)
+        for line in lines[signature_index + 1 : formula_index]
+    ):
+        return lines
+    if formula_index is None:
+        operative_end = next(
+            (
+                index
+                for index, line in enumerate(lines[signature_index + 1 :], signature_index + 1)
+                if annex_re.match(line.strip()) or signatory_re.match(line.strip())
+            ),
+            len(lines),
+        )
+        first_article = next(
+            (
+                index
+                for index, line in enumerate(lines[signature_index + 1 : operative_end], signature_index + 1)
+                if article_heading_re.match(line.strip())
+            ),
+            None,
+        )
+        preceding_nonempty = (
+            sum(bool(line.strip()) for line in lines[signature_index + 1 : first_article])
+            if first_article is not None
+            else 99
+        )
+        if (
+            first_article is None
+            or preceding_nonempty > 5
+            or any(
+                _looks_like_attachment_boundary(line)
+                for line in lines[signature_index + 1 : first_article]
+            )
+        ):
+            return lines
+        move_start = next(
+            index
+            for index in range(signature_index + 1, first_article + 1)
+            if lines[index].strip()
+        )
+        binding_re = re.compile(
+            r"^This\s+(?:Regulation|Decision|Directive)\s+shall\s+be\s+binding\b",
+            re.IGNORECASE,
+        )
+        insertion_index = next(
+            (
+                index
+                for index, line in enumerate(lines[:signature_index])
+                if binding_re.match(line.strip())
+            ),
+            signature_index,
+        )
+        block = lines[move_start:operative_end]
+        remaining = lines[:move_start] + lines[operative_end:]
+        return remaining[:insertion_index] + block + remaining[insertion_index:]
+
+    repaired: list[str] = []
+    trailing_article_re = re.compile(
+        r"^(?P<prefix>.+\S)\s+(?P<heading>(?:Sole\s+)?Article(?!s)\s+\d+[a-z]*)\s*$",
+        re.IGNORECASE,
+    )
+    for index, line in enumerate(lines):
+        match = trailing_article_re.match(line.strip())
+        next_text = next(
+            (candidate.strip() for candidate in lines[index + 1 :] if candidate.strip()),
+            "",
+        )
+        if (
+            index < signature_index
+            and match
+            and match.group("prefix").lstrip().lower().startswith("whereas")
+            and re.match(
+                r"^This\s+(?:Regulation|Decision|Directive)\s+shall\b",
+                next_text,
+                re.IGNORECASE,
+            )
+        ):
+            repaired.extend([match.group("prefix"), match.group("heading")])
+        else:
+            repaired.append(line)
+    lines = repaired
+
+    signature_index = next(
+        index for index, line in enumerate(lines) if signature_re.match(line.strip())
+    )
+    formula_index = next(
+        index
+        for index, line in enumerate(lines[signature_index + 1 :], signature_index + 1)
+        if formula_re.match(line.strip())
+    )
+    operative_end = next(
+        (
+            index
+            for index, line in enumerate(lines[formula_index + 1 :], formula_index + 1)
+            if annex_re.match(line.strip()) or signatory_re.match(line.strip())
+        ),
+        len(lines),
+    )
+
+    move_start = formula_index
+    footnote_indexes = [
+        index
+        for index, line in enumerate(lines[signature_index + 1 : formula_index], signature_index + 1)
+        if re.match(r"^[('O0\[]", line.strip())
+        and re.search(r"\bOJ\s+(?:No\s+)?[LC]?\s*\d", line, re.IGNORECASE)
+    ]
+    if footnote_indexes:
+        candidate = next(
+            (
+                index
+                for index in range(footnote_indexes[-1] + 1, formula_index)
+                if lines[index].strip()
+            ),
+            formula_index,
+        )
+        move_start = candidate
+
+    insertion_index = next(
+        (
+            index
+            for index, line in enumerate(lines[:signature_index])
+            if article_heading_re.match(line.strip())
+        ),
+        None,
+    )
+    if insertion_index is None:
+        binding_re = re.compile(
+            r"^This\s+(?:Regulation|Decision|Directive)\s+shall\s+be\s+binding\b",
+            re.IGNORECASE,
+        )
+        insertion_index = next(
+            (
+                index
+                for index, line in enumerate(lines[:signature_index])
+                if binding_re.match(line.strip())
+            ),
+            signature_index,
+        )
+
+    block = lines[move_start:operative_end]
+    remaining = lines[:move_start] + lines[operative_end:]
+    if insertion_index > move_start:
+        insertion_index -= len(block)
+    return remaining[:insertion_index] + block + remaining[insertion_index:]
+
+
 def _parse_legislative_markdown(
     text: str,
     *,
@@ -662,28 +1311,97 @@ def _parse_legislative_markdown(
     blank lines).
     """
     units: list[dict] = []
+    signature_re = re.compile(r"^Done at \w+[,\s]+\d", re.IGNORECASE)
     # Pre-process: join lines where OCR splits "Article\n1" or "ANNEX\nI" across lines.
     text = re.sub(r"\b(Article)\s*\n\s*(\d+)\b", r"\1 \2", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(ANNEX)\s*\n\s*([IVXLCDMivxlcdm0-9]+)\b", r"\1 \2", text, flags=re.IGNORECASE)
     lines = text.split("\n")
+    lines = _repair_interleaved_article_markers(lines)
+    lines = _repair_embedded_operative_markers(lines)
+    tail_annex_re = re.compile(
+        r"^#{1,3}\s+ANNEX(?:\s+[IVXLCDMivxlcdm0-9]+)?\s*$", re.IGNORECASE,
+    )
+    for heading_index, line in enumerate(lines):
+        if not tail_annex_re.match(line.strip()):
+            continue
+        if not all(
+            not candidate.strip() or tail_annex_re.match(candidate.strip())
+            for candidate in lines[heading_index:]
+        ):
+            continue
+        table_start: int | None = None
+        for index in range(heading_index - 1, -1, -1):
+            stripped = lines[index].strip()
+            if stripped.startswith("|"):
+                table_start = index
+            elif not stripped and table_start is not None:
+                continue
+            elif table_start is not None:
+                break
+        if table_start is not None:
+            lines = (
+                lines[:table_start]
+                + lines[heading_index:]
+                + lines[table_start:heading_index]
+            )
+        break
+    nonempty = [(index, line.strip()) for index, line in enumerate(lines) if line.strip()]
+    if nonempty and signature_re.match(nonempty[0][1]):
+        title_re = re.compile(
+            r"^#{1,3}\s+(?:COMMISSION|COUNCIL|EUROPEAN\s+PARLIAMENT)\s+"
+            r"(?:REGULATION|DIRECTIVE|DECISION)\b",
+            re.IGNORECASE,
+        )
+        title_index = next(
+            (index for index, line in nonempty[1:] if title_re.match(line)), None,
+        )
+        if title_index is not None and any(
+            re.match(r"^(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED)\b", line, re.IGNORECASE)
+            for index, line in nonempty
+            if index >= title_index
+        ):
+            lines = lines[title_index:]
+    lines = _repair_displaced_operative_block(lines)
+    repaired_text = "\n".join(lines)
+    quoted_regions = _find_quoted_regions(repaired_text)
+    line_offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        line_offsets.append(offset)
+        offset += len(line) + 1
 
     recital_counter = 0
     in_recital_zone = False
     current_article: dict | None = None
     current_annex: dict | None = None
     current_recital: dict | None = None
+    seen_enacting_formula = False
 
     # "Done at <city>, <date>" signals end of legislative content.
-    signature_re = re.compile(r"^Done at \w+[,\s]+\d", re.IGNORECASE)
     past_signature = False
 
     # Match articles/annexes as markdown headings (## Article 1) or as
     # standalone short lines (Article 1) — Docling doesn't always add headings.
     # Bare "Article N" in long body text must NOT match.
     art_heading_re = re.compile(r"^#{1,3}\s+(?:Sole\s+)?Article(?!s)(?:\s+(\d+[a-z]*))?", re.IGNORECASE)
-    art_bare_re = re.compile(r"^(?:Sole\s+)?Article(?!s)(?:\s+(\d+[a-z]*))?\s*$", re.IGNORECASE)
-    annex_heading_re = re.compile(r"^#{1,3}\s+ANNEX\s*([IVXLCDMivxlcdm0-9]*)(.*)", re.IGNORECASE)
-    annex_bare_re = re.compile(r"^ANNEX\s*([IVXLCDMivxlcdm0-9]*)\s*$", re.IGNORECASE)
+    art_bare_re = re.compile(
+        r"^(?:Sole\s+)?Article(?!s)(?:\s+(\d+[a-z]*))?", re.IGNORECASE,
+    )
+    annex_heading_re = re.compile(
+        r"^#{1,3}\s+ANNEX\s*(?P<number>[IVXLCDMivxlcdm0-9]*)(?P<title>.*)",
+        re.IGNORECASE,
+    )
+    annex_bare_re = re.compile(
+        r"^ANNEX\s*(?P<number>[IVXLCDMivxlcdm0-9]*)\s*$", re.IGNORECASE,
+    )
+    annex_titled_re = re.compile(
+        r"^ANNEX(?:\s+(?P<number>[IVXLCDM0-9]+))?\s+(?P<title>.+)$",
+    )
+    multilingual_annex_re = re.compile(
+        r"^#{1,3}\s+(?=[^\n]*\bANNEX\b)"
+        r"(?:ANNEXE|ANHANG|ALLEGATO|BIJLAGE|BILAG|ΠΑΡΑΡΤΗΜΑ)\b[^\n]*$",
+        re.IGNORECASE,
+    )
     # Match "(1) text" and also "- (1) text" (Docling bullet format).
     numbered_recital_re = re.compile(r"^-?\s*\((\d+)\)\s*(.*)")
     # Recital-zone trigger. "Whereas:" is the native English marker; Opus-MT
@@ -730,30 +1448,38 @@ def _parse_legislative_markdown(
             ))
 
     def _start_annex(match: re.Match) -> dict:
-        # group(2) exists for the heading regex but not the bare regex.
-        try:
-            title = match.group(2).strip() or None
-        except IndexError:
-            title = None
+        groups = match.groupdict()
+        number = (groups.get("number") or "").strip() or None
+        title = (groups.get("title") or "").strip() or None
         return {
             "type": "annex",
-            "number": match.group(1).strip() or None,
+            "number": number,
             "title": title,
             "text": "",
             "_body": [],
         }
 
     def _match_annex(stripped: str) -> re.Match | None:
+        multilingual = multilingual_annex_re.match(stripped)
+        if multilingual:
+            return multilingual
         # "ANNEXES"/"Annexe(s)" are cover headings or references, not annex
         # starts — without this guard "## ANNEXES" becomes an annex titled "ES".
         if re.match(r"^#{0,3}\s*ANNEXE", stripped, re.IGNORECASE):
             return None
-        return annex_heading_re.match(stripped) or annex_bare_re.match(stripped)
+        return (
+            annex_heading_re.match(stripped)
+            or annex_bare_re.match(stripped)
+            or annex_titled_re.match(stripped)
+        )
 
-    for line in lines:
+    for line_index, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             continue
+        forced_outer_article = stripped.startswith(_FORCED_OUTER_ARTICLE)
+        if forced_outer_article:
+            stripped = stripped.removeprefix(_FORCED_OUTER_ARTICLE)
 
         # "Done at <city>, <date>" signals the end of the enacting terms.
         # Annexes follow the signature in the OJ layout, so keep collecting
@@ -781,12 +1507,57 @@ def _parse_legislative_markdown(
         # Enacting formula: end of recitals, no doc-unit emitted for it.
         # Covers both modern-style (in_recital_zone) and old-style (continuing
         # recital built from "Whereas the …" line that doesn't set the zone).
-        if (in_recital_zone or current_recital is not None) and enacting_formula_re.match(stripped):
-            in_recital_zone = False
-            _flush_recital()
+        if enacting_formula_re.match(stripped):
+            seen_enacting_formula = True
+            if in_recital_zone or current_recital is not None:
+                in_recital_zone = False
+                _flush_recital()
             continue
 
         art_match = art_heading_re.match(stripped) or art_bare_re.match(stripped)
+        if (
+            art_match
+            and not forced_outer_article
+            and _is_in_quoted_region(line_offsets[line_index], quoted_regions)
+        ):
+            art_match = None
+        if art_match:
+            after = stripped[art_match.end():].strip()
+            if (
+                art_match.group(1) is None
+                and not re.match(
+                    r"^#{0,3}\s*Sole\s+Article", stripped, re.IGNORECASE,
+                )
+            ):
+                art_match = None
+            elif after and re.match(r"^[.,;:\-–—\|]+$", after):
+                after = ""
+            if art_match and after and re.match(
+                r"(?:\([a-z0-9]+\)|of |to |the |is |shall |and |in |for |or |"
+                r"which |has |was |provides |referred |,)",
+                after,
+                re.IGNORECASE,
+            ):
+                if not (
+                    seen_enacting_formula
+                    and after[0].isupper()
+                ):
+                    art_match = None
+            elif art_match and not after:
+                next_text = next(
+                    (
+                        candidate.strip()
+                        for candidate in lines[line_index + 1:]
+                        if candidate.strip()
+                    ),
+                    "",
+                )
+                if next_text and (
+                    next_text[0].islower()
+                    or re.match(r"^\(\d+\)\s*(?:of\b|thereof)", next_text)
+                    or next_text.startswith("thereof")
+                ):
+                    art_match = None
         annex_match = _match_annex(stripped)
 
         if art_match:
@@ -895,6 +1666,8 @@ def _flush(item: dict | None, units: list[dict], include: bool) -> None:
     if item.get("type") == "recital" and item["text"]:
         item["text"] = _pdf_strip_recital_tail(item["text"])
         item["subtype"] = _pdf_classify_recital(item["text"])
+        if sum(character.isalpha() for character in item["text"]) < 3:
+            return
     if item["text"] or item.get("title") or item.get("number"):
         units.append(item)
 

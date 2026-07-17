@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 from eurlex_builder.constants import TEXT_UNIT_IDENTITY_COLUMNS
+from eurlex_builder.translate import translation_quality_issue
 
 
 def validate_database(db_path: str | Path) -> list[dict[str, object]]:
@@ -53,6 +54,31 @@ def _validate_connection(conn) -> list[dict[str, object]]:
         return issues
 
     checks = [
+        (
+            "error", "duplicate_work_id",
+            """SELECT count(*) FROM (
+                   SELECT celex_id FROM works GROUP BY celex_id HAVING count(*) > 1
+               )""",
+        ),
+        (
+            "error", "duplicate_text_unit_id",
+            """SELECT count(*) FROM (
+                   SELECT id FROM text_units GROUP BY id HAVING count(*) > 1
+               )""",
+        ),
+        (
+            "error", "duplicate_relation_id",
+            """SELECT count(*) FROM (
+                   SELECT id FROM relations GROUP BY id HAVING count(*) > 1
+               )""",
+        ),
+        (
+            "error", "duplicate_checkpoint_id",
+            """SELECT count(*) FROM (
+                   SELECT celex_id FROM _checkpoint
+                   GROUP BY celex_id HAVING count(*) > 1
+               )""",
+        ),
         (
             "error", "checkpoint_without_work",
             """SELECT count(*) FROM _checkpoint c LEFT JOIN works w USING (celex_id)
@@ -111,6 +137,12 @@ def _validate_connection(conn) -> list[dict[str, object]]:
                WHERE unit_order IS NULL OR unit_key IS NULL""",
         ),
         (
+            "error", "marker_only_recital",
+            """SELECT count(*) FROM text_units
+               WHERE type = 'recital'
+                 AND trim(text) = '(' || coalesce(number, '') || ')'""",
+        ),
+        (
             "error", "duplicate_unit_order",
             """SELECT count(*) FROM (
                    SELECT celex_id, unit_order FROM text_units
@@ -128,6 +160,13 @@ def _validate_connection(conn) -> list[dict[str, object]]:
             "error", "pending_pdf_repair",
             """SELECT count(*) FROM works
                WHERE content_source LIKE 'repair_pending__cellar_pdf%'""",
+        ),
+        (
+            "warning", "untranslated_non_english_unit",
+            """SELECT count(*) FROM text_units t JOIN works w USING (celex_id)
+               WHERE w.language != 'eng'
+                 AND t.text IS NOT NULL AND t.text != ''
+                 AND t.text_translated IS NULL""",
         ),
         (
             "warning", "works_without_content",
@@ -153,6 +192,47 @@ def _validate_connection(conn) -> list[dict[str, object]]:
         count = conn.execute(query).fetchone()[0]
         if count:
             issues.append({"severity": severity, "code": code, "count": count})
+
+    if "_translation_failures" in tables:
+        translation_failures = conn.execute(
+            "SELECT count(*) FROM _translation_failures"
+        ).fetchone()[0]
+        if translation_failures:
+            issues.append({
+                "severity": "warning",
+                "code": "recorded_translation_rejection",
+                "count": translation_failures,
+            })
+
+    rejected_works = sum(
+        translation_quality_issue(source, translated, document=True) is not None
+        for source, translated in conn.execute(
+            """SELECT full_text_original, full_text FROM works
+               WHERE full_text_original IS NOT NULL AND full_text IS NOT NULL"""
+        ).fetchall()
+    )
+    if rejected_works:
+        issues.append({
+            "severity": "error",
+            "code": "degenerate_full_text_translation",
+            "count": rejected_works,
+        })
+
+    rejected_units = sum(
+        translation_quality_issue(source, translated) is not None
+        for source, translated in conn.execute(
+            """SELECT t.text, t.text_translated
+               FROM text_units t JOIN works w USING (celex_id)
+               WHERE w.language != 'eng'
+                 AND t.text IS NOT NULL AND t.text_translated IS NOT NULL"""
+        ).fetchall()
+    )
+    if rejected_units:
+        issues.append({
+            "severity": "error",
+            "code": "degenerate_text_unit_translation",
+            "count": rejected_units,
+        })
 
     manifest_hash_mismatches = 0
     for config_json, config_sha256 in conn.execute(

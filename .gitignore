@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 .venv/
+.env
+.env.*
+!.env.example
 
 # Data / output (keep locally, not on GitHub)
 *.duckdb

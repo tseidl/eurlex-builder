@@ -36,6 +36,7 @@ translate = [
     "transformers>=4.40",
     "torch>=2.0",
     "sentencepiece>=0.2",
+    "sacremoses>=0.1",
 ]
 all = [
     "eurlex-builder[pdf,translate]",

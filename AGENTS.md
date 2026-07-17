@@ -40,7 +40,7 @@ Configurable Python pipeline that builds structured datasets from EU legislative
 
 ```bash
 eurlex-builder run config.yaml [--fresh] [--retry-failed] [--limit N]
-eurlex-builder translate <db> [--no-full-text] [--no-text-units]
+eurlex-builder translate <db> [--no-full-text] [--no-text-units] [--retry-rejected]
 eurlex-builder enrich <db> [--select metadata relations eurovoc] [--parallel]
 eurlex-builder status <db>
 eurlex-builder validate <db>
@@ -52,7 +52,9 @@ eurlex-builder validate <db>
 - Each pipeline thread reuses one standalone Docling subprocess; a hard timeout kills the process group and the next PDF starts a clean worker
 - Only complete Docling conversions are accepted; partial, failed, timed-out, crashed, and oversized conversions use pymupdf and receive a queryable `content_source` suffix
 - The 50MB Docling size guard, PDF/COM conversion, and fallback provenance share one extraction path
+- Same-language HTML-to-PDF structural fallback is additive: it retains source units verbatim, requires article-set corroboration, and adds only missing credible identifiers
 - Translate-before-extract fallback for non-English legislative PDFs where requested structures are missing; adopted only when requested structure counts improve without regressions
+- Translation uses pinned Opus-MT revisions, tokenizer-bounded chunks, retry generation, quality guards, and a policy-versioned rejection ledger; rejected output never replaces source text
 - Sub-article splitter operates on `body_parts: list[str]` from extractors, not raw HTML
 - Point markers are validated against the drafting sequence ((a), (aa), (b), …); roman sub-points stay inside their parent point
 - "Done at …" ends the enacting terms, but extractors resume collection at ANNEX headings — annexes follow the signature in the OJ layout
@@ -62,4 +64,4 @@ eurlex-builder validate <db>
 - `--limit N` bounds a resumable canary and cannot be combined with `--fresh`
 - Relations cached from metadata SPARQL to avoid duplicate queries
 - Stable text-unit keys combine CELEX and structural coordinates; `unit_order` preserves document order
-- Run manifests store the validated config hash and dependency versions in DuckDB
+- Run manifests store the validated config hash, Git state, and dependency versions in DuckDB
