@@ -569,7 +569,10 @@ def _article_sequence_is_complete(units: list[dict]) -> bool:
         return False
     bases: list[int] = []
     for number in numbers:
-        base = int(re.match(r"\d+", number).group())
+        match = re.match(r"\d+", number)
+        if match is None:
+            return False
+        base = int(match.group())
         if base not in bases:
             bases.append(base)
     return bases == list(range(1, bases[-1] + 1))
@@ -1194,7 +1197,7 @@ def _repair_displaced_operative_block(lines: list[str]) -> list[str]:
             r"^This\s+(?:Regulation|Decision|Directive)\s+shall\s+be\s+binding\b",
             re.IGNORECASE,
         )
-        insertion_index = next(
+        fallback_insertion_index = next(
             (
                 index
                 for index, line in enumerate(lines[:signature_index])
@@ -1204,7 +1207,11 @@ def _repair_displaced_operative_block(lines: list[str]) -> list[str]:
         )
         block = lines[move_start:operative_end]
         remaining = lines[:move_start] + lines[operative_end:]
-        return remaining[:insertion_index] + block + remaining[insertion_index:]
+        return (
+            remaining[:fallback_insertion_index]
+            + block
+            + remaining[fallback_insertion_index:]
+        )
 
     repaired: list[str] = []
     trailing_article_re = re.compile(
@@ -1267,7 +1274,7 @@ def _repair_displaced_operative_block(lines: list[str]) -> list[str]:
         )
         move_start = candidate
 
-    insertion_index = next(
+    insertion_index: int | None = next(
         (
             index
             for index, line in enumerate(lines[:signature_index])

@@ -98,7 +98,10 @@ def _article_sequence_is_credible(units: list[dict]) -> bool:
         return False
     bases: list[int] = []
     for number in numbers:
-        base = int(re.match(r"\d+", number).group())
+        match = re.match(r"\d+", number)
+        if match is None:
+            return False
+        base = int(match.group())
         if base not in bases:
             bases.append(base)
     return bases == list(range(1, bases[-1] + 1))
