@@ -210,7 +210,7 @@ def _extract_table_recitals(tree) -> list[dict]:
 
     elements = list(tree.iter())
     positions = {element: position for position, element in enumerate(elements)}
-    operative_positions = [
+    article_positions = [
         positions[element]
         for element in elements
         if (
@@ -219,6 +219,8 @@ def _extract_table_recitals(tree) -> list[dict]:
             and (element.get("id") or "").startswith("art")
         )
     ]
+    paragraph_article_positions: list[int] = []
+    formula_positions: list[int] = []
     for element in elements:
         if not isinstance(element.tag, str):
             continue
@@ -227,17 +229,24 @@ def _extract_table_recitals(tree) -> list[dict]:
         if element.xpath(".//*[local-name()='p']"):
             continue
         text = _extract_text(element).strip()
-        if re.search(
-            r"\b(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b",
+        if re.match(
+            r"^(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b",
             text,
             re.IGNORECASE,
-        ) or re.fullmatch(
+        ):
+            formula_positions.append(positions[element])
+        if re.fullmatch(
             r"(?:Sole\s+)?Article(?!s)(?:\s+\d+[a-z]*)?[.,;:\-–—]?",
             text,
             re.IGNORECASE,
         ):
-            operative_positions.append(positions[element])
-    first_operative_position = min(operative_positions, default=None)
+            paragraph_article_positions.append(positions[element])
+    article_positions.extend(paragraph_article_positions)
+    first_operative_position = (
+        min(article_positions)
+        if article_positions
+        else min(formula_positions, default=None)
+    )
 
     for table in tree.iter("{http://www.w3.org/1999/xhtml}table", "table"):
         if (
@@ -246,7 +255,20 @@ def _extract_table_recitals(tree) -> list[dict]:
         ):
             break
 
-        rows = table.xpath(".//*[local-name()='tr']")
+        if any(
+            any(
+                numbered_re.fullmatch(_extract_text(cell).strip())
+                for cell in row.xpath("./*[local-name()='td']")[:-1]
+            )
+            for row in table.xpath("ancestor::*[local-name()='tr']")
+        ):
+            continue
+
+        rows = [
+            row
+            for row in table.xpath(".//*[local-name()='tr']")
+            if row.xpath("ancestor::*[local-name()='table']")[-1] is table
+        ]
         for row in rows:
             cells = row.xpath("./*[local-name()='td']")
             if len(cells) >= 2:
@@ -277,19 +299,73 @@ def _extract_table_recitals(tree) -> list[dict]:
                         "text": cleaned,
                     })
 
-    return units
+    return _remove_embedded_table_restarts(units)
 
 
-def _table_recital_sequence_is_credible(units: list[dict]) -> bool:
-    numbers = [unit.get("number") for unit in units]
-    return (
-        len(numbers) >= 2
-        and numbers == [str(number) for number in range(1, len(numbers) + 1)]
-        and all(
+def _remove_embedded_table_restarts(units: list[dict]) -> list[dict]:
+    filtered: list[dict] = []
+    index = 0
+    while index < len(units):
+        try:
+            number = int(str(units[index].get("number") or ""))
+        except (TypeError, ValueError):
+            filtered.append(units[index])
+            index += 1
+            continue
+        if number == 1 and filtered:
+            try:
+                expected = int(str(filtered[-1].get("number") or "")) + 1
+            except (TypeError, ValueError):
+                expected = 0
+            resume = next(
+                (
+                    candidate
+                    for candidate in range(index + 1, len(units))
+                    if str(units[candidate].get("number") or "")
+                    == str(expected)
+                ),
+                None,
+            )
+            if resume is not None:
+                try:
+                    restarted: list[int] | None = [
+                        int(str(unit.get("number") or ""))
+                        for unit in units[index:resume]
+                    ]
+                except (TypeError, ValueError):
+                    restarted = None
+                if restarted is not None and restarted == list(
+                    range(1, len(restarted) + 1)
+                ):
+                    index = resume
+                    continue
+        filtered.append(units[index])
+        index += 1
+    return filtered
+
+
+def _table_recital_sequence_start(units: list[dict]) -> int | None:
+    if len(units) < 2:
+        return None
+    try:
+        numbers = [int(str(unit.get("number") or "")) for unit in units]
+    except (TypeError, ValueError):
+        return None
+    start = numbers[0]
+    if (
+        start < 1
+        or numbers != list(range(start, start + len(numbers)))
+        or not all(
             sum(character.isalpha() for character in unit.get("text", "")) >= 3
             for unit in units
         )
-    )
+    ):
+        return None
+    return start
+
+
+def _table_recital_sequence_is_credible(units: list[dict]) -> bool:
+    return _table_recital_sequence_start(units) == 1
 
 
 def _extract_standard_articles(tree, *, granularity: str = "article") -> list[dict]:
@@ -2116,8 +2192,45 @@ class HtmlExtractor:
                     article_granularity=article_granularity,
                     container=body[0],
                 )
+                table_sequence_start = _table_recital_sequence_start(
+                    table_recitals
+                )
+                if table_sequence_start is not None and table_sequence_start > 1:
+                    text_recitals_by_number: dict[int, dict] = {}
+                    for unit in text_units:
+                        if unit.get("type") != "recital":
+                            continue
+                        try:
+                            number = int(str(unit.get("number") or ""))
+                        except (TypeError, ValueError):
+                            continue
+                        if sum(
+                            character.isalpha()
+                            for character in unit.get("text", "")
+                        ) < 3:
+                            continue
+                        existing = text_recitals_by_number.get(number)
+                        if existing is None or len(unit.get("text", "")) > len(
+                            existing.get("text", "")
+                        ):
+                            text_recitals_by_number[number] = unit
+                    prefix: list[dict] = []
+                    for number in range(1, table_sequence_start):
+                        recital = text_recitals_by_number.get(number)
+                        if recital is None:
+                            prefix = []
+                            break
+                        prefix.append(recital)
+                    if len(prefix) == table_sequence_start - 1:
+                        table_recitals = [*prefix, *table_recitals]
+                        text_units = [
+                            unit
+                            for unit in text_units
+                            if unit.get("type") != "recital"
+                        ]
+                        credible_table_recitals = True
                 if not credible_table_recitals:
-                    text_recitals = any(
+                    has_text_recitals = any(
                         unit.get("type") == "recital" for unit in text_units
                     )
                     isolated_substantive = (
@@ -2127,7 +2240,7 @@ class HtmlExtractor:
                             for character in table_recitals[0].get("text", "")
                         ) >= 3
                     )
-                    if text_recitals or not isolated_substantive:
+                    if has_text_recitals or not isolated_substantive:
                         table_recitals = []
                 units = table_recitals + text_units
                 if units:

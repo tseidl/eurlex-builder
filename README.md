@@ -240,7 +240,7 @@ data:
 |-------|------|---------|-------------|
 | `automated_mode` | bool | `false` | Skip interactive EuroVoc keyword review |
 | `parallel` | bool | `false` | Multi-threaded fetching |
-| `max_workers` | int (1–16) | `4` | Number of parallel threads. Start with 8; PDF-heavy runs may be limited by CPU and memory rather than the connection |
+| `max_workers` | int (1–16) | `4` | Number of parallel threads. Four is the conservative default because each PDF-processing thread owns a Docling worker. HTML-dominant runs may benefit from 8; benchmark on the target machine rather than assuming more workers are faster |
 | `include_relations` | bool | `true` | Fetch + store inter-document relations |
 | `include_eurovoc` | bool | `false` | Include EuroVoc descriptors in metadata fetch (also via the `enrich` command) |
 | `fetch_original_recitals_for_consolidated` | bool | `true` | Consolidated texts: fetch recitals from the original act |
@@ -282,6 +282,14 @@ Article 5
 A short preamble before paragraph `1.` gets its own row with `paragraph_num = "0"`. Articles in amending acts (lists of edits to other regulations) are flagged `subtype = 'amendment_item'`; substantive replacement text within them stays untagged so downstream classifiers can keep it.
 
 Recitals are emitted identically across all granularity settings.
+
+For legacy HTML, numbered table rows are accepted as recitals only when they
+form a credible drafting sequence. Nested numbered tables remain inside their
+parent recital, embedded sibling lists are excluded only when the main sequence
+resumes, and a table continuation is joined to preceding paragraph recitals
+only when every earlier number is present. For legacy PDFs, a
+page-break fragment such as `(1) of Regulation ...` remains part of the active
+recital instead of starting a false numbered sequence.
 
 ---
 

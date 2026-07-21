@@ -1299,6 +1299,133 @@ The aid is compatible with the common market.
     assert [unit["number"] for unit in units if unit["type"] == "article"] == ["1"]
 
 
+def test_pdf_parser_keeps_decreasing_number_as_recital_continuation():
+    md = """Whereas:
+(1) The first complete reason.
+(2) The second reason starts here.
+(1) of Regulation (EEC) No 1/80 continues the second reason.
+(3) The third complete reason.
+HAS ADOPTED THIS DECISION:
+Article 1
+The operative rule.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2", "3"]
+    assert "continues the second reason" in recitals[1]["text"]
+
+
+def test_pdf_parser_preserves_restarted_capitalized_recital_sequence():
+    md = """Whereas:
+(7) The first seventh recital.
+(8) The first eighth recital.
+(7) The second seventh recital.
+(8) The second eighth recital.
+HAS ADOPTED THIS DECISION:
+Article 1
+The operative rule.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["7", "8", "7", "8"]
+
+
+def test_pdf_parser_keeps_numbered_page_fragment_in_old_style_recital():
+    md = """Whereas the first complete reason;
+Whereas the second complete reason;
+Whereas the third reason starts here
+(2) of Regulation (EEC) No 1/80; whereas it continues here;
+Whereas the fourth complete reason,
+HAS ADOPTED THIS REGULATION:
+Article 1
+The operative rule.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2", "3", "4"]
+    assert "it continues here" in recitals[2]["text"]
+
+
+def test_pdf_parser_does_not_start_zone_for_higher_inline_page_fragment():
+    md = """Whereas the first reason starts here
+(2) of Regulation (EEC) No 1/80; whereas it continues here;
+Whereas the second complete reason,
+HAS ADOPTED THIS REGULATION:
+Article 1
+The operative rule.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2"]
+    assert "it continues here" in recitals[0]["text"]
+    assert recitals[1]["text"] == "Whereas the second complete reason,"
+
+
+def test_pdf_parser_keeps_single_lowercase_numbered_recital_without_zone_marker():
+    md = """(2) applications submitted on time satisfy the quota; whereas the
+corresponding percentage reduction should be fixed,
+HAS ADOPTED THIS REGULATION:
+Article 1
+The operative rule.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["2"]
+    assert "percentage reduction" in recitals[0]["text"]
+
+
+def test_pdf_parser_ignores_unattached_leading_reference_fragment():
+    md = """(2) of Regulation (EEC) No 1/80; whereas it continues here;
+HAS ADOPTED THIS REGULATION:
+Article 1
+The operative rule.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    assert not [unit for unit in units if unit["type"] == "recital"]
+
+
+def test_pdf_parser_keeps_increasing_lowercase_numbered_recitals():
+    md = """Whereas:
+(1) the first numbered reason;
+(2) applications submitted on time satisfy the second reason.
+HAS ADOPTED THIS REGULATION:
+Article 1
+The operative rule.
+"""
+
+    units = _parse_legislative_markdown(
+        md, include_recitals=True, include_articles=True, include_annexes=False,
+    )
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2"]
+    assert recitals[1]["text"].startswith("(2) applications")
+
+
 def test_pdf_parser_accepts_inline_article_body_after_enacting_formula():
     md = """HAVE DECIDED AS FOLLOWS:
 Article 1 The following measure is approved.
@@ -1692,6 +1819,73 @@ def test_classless_credible_pre_formula_table_recitals_are_retained():
     recitals = [unit for unit in units if unit["type"] == "recital"]
     assert [unit["number"] for unit in recitals] == ["1", "2"]
     assert "first complete reason" in recitals[0]["text"]
+
+
+def test_table_recitals_do_not_stop_at_incidental_enacting_phrase():
+    raw = b"""<html><body>
+<table><tr><td>(1)</td><td>The Commission has adopted a prior decision.</td></tr></table>
+<table><tr><td>(2)</td><td>The second complete reason.</td></tr></table>
+<p>HAS ADOPTED THIS DECISION:</p>
+<div id="art_1"><p>The operative rule.</p></div>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X-TABLE-PHRASE", raw)
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2"]
+
+
+def test_table_recitals_keep_nested_numbered_lists_inside_parent():
+    raw = b"""<html><body>
+<table><tr><td>(1)</td><td>The first reason.
+<table><tr><td>(1)</td><td>Nested evidence one.</td></tr>
+<tr><td>(2)</td><td>Nested evidence two.</td></tr></table>
+</td></tr></table>
+<table><tr><td>(2)</td><td>The second complete reason.</td></tr></table>
+<p>HAS ADOPTED THIS DECISION:</p>
+<div id="art_1"><p>The operative rule.</p></div>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X-NESTED-TABLE", raw)
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2"]
+    assert "Nested evidence one" in recitals[0]["text"]
+
+
+def test_classless_table_recitals_continue_paragraph_sequence():
+    raw = b"""<html><body>
+<p>Whereas:</p>
+<p>(1) The first complete reason.</p>
+<p>(2) The second complete reason.</p>
+<table><tr><td>(3)</td><td>The third complete reason.</td></tr>
+<tr><td>(4)</td><td>The fourth complete reason.</td></tr></table>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X-MIXED-RECITALS", raw)
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2", "3", "4"]
+    assert recitals[-1]["text"] == "(4) The fourth complete reason."
+
+
+def test_table_recitals_skip_sibling_numbered_list_before_sequence_resumes():
+    raw = b"""<html><body>
+<table><tr><td>(1)</td><td>The first complete reason.</td></tr></table>
+<table><tr><td>(2)</td><td>The second complete reason.</td></tr></table>
+<p>(a) Legal basis</p>
+<table><tr><td>(1)</td><td>First cited instrument.</td></tr></table>
+<table><tr><td>(2)</td><td>Second cited instrument.</td></tr></table>
+<table><tr><td>(3)</td><td>The third complete reason.</td></tr></table>
+<p>HAS ADOPTED THIS DECISION:</p>
+<div id="art_1"><p>The operative rule.</p></div>
+</body></html>"""
+
+    units = HtmlExtractor().extract("X-SIBLING-LIST", raw)
+
+    recitals = [unit for unit in units if unit["type"] == "recital"]
+    assert [unit["number"] for unit in recitals] == ["1", "2", "3"]
+    assert all("cited instrument" not in unit["text"] for unit in recitals)
 
 
 def test_text_only_does_not_promote_dotted_topic_headings_to_recitals():

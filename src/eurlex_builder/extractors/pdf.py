@@ -852,6 +852,9 @@ def extract_pdf_full_text(raw_content: bytes) -> str | None:
 _PDF_INLINE_REF_RE = re.compile(
     r"^-?\s*\(\d+\)\s+(?:of |to |the |thereof|is |shall |and |in |for |or |which |[a-z])",
 )
+_PDF_LEADING_REFERENCE_FRAGMENT_RE = re.compile(
+    r"^-?\s*\(\d+\)\s+(?:of|to|thereof)\b",
+)
 _PDF_FOOTNOTE_REF_RE = re.compile(
     r"^-?\s*\(\d+\)\s+(?:OJ\s+(?:No\s+)?[LC]?\s*\d|"
     r"\[\d{4}\]\s*ECR|Ibidem|Ibid\.|Cf\.\s)",
@@ -1607,25 +1610,53 @@ def _parse_legislative_markdown(
         elif in_recital_zone:
             num_match = numbered_recital_re.match(stripped)
             if num_match:
-                # Skip footnote refs / inline cross-refs disguised as recitals.
-                if _PDF_FOOTNOTE_REF_RE.match(stripped) or _PDF_INLINE_REF_RE.match(stripped):
+                if _PDF_FOOTNOTE_REF_RE.match(stripped):
                     continue
-                # New numbered recital — flush previous, start new.
-                _flush_recital()
-                current_recital = {
-                    "type": "recital",
-                    "number": num_match.group(1),
-                    "title": None,
-                    "text": "",
-                    "_body": [stripped],
-                }
+                number = int(num_match.group(1))
+                current_number = None
+                if current_recital is not None:
+                    current_number = int(current_recital["number"])
+                inline_reference = bool(_PDF_INLINE_REF_RE.match(stripped))
+                if (
+                    current_recital is not None
+                    and current_number is not None
+                    and number <= current_number
+                    and inline_reference
+                ):
+                    current_recital["_body"].append(stripped)
+                elif current_number is None and inline_reference and number != 1:
+                    continue
+                else:
+                    _flush_recital()
+                    current_recital = {
+                        "type": "recital",
+                        "number": num_match.group(1),
+                        "title": None,
+                        "text": "",
+                        "_body": [stripped],
+                    }
             elif current_recital is not None:
                 # Continuation line for the current recital.
                 current_recital["_body"].append(stripped)
 
         elif (
             (num_match := numbered_recital_re.match(stripped))
-            and ("WHEREAS" in stripped.upper() or "CONSIDERING" in stripped.upper())
+            and (
+                re.match(
+                    r"^-?\s*\(\d+\)\s*(?:Whereas|Considering)\b",
+                    stripped,
+                    re.IGNORECASE,
+                )
+                or (
+                    current_recital is None
+                    and re.search(
+                        r"\b(?:whereas|considering)\b",
+                        stripped,
+                        re.IGNORECASE,
+                    )
+                    and not _PDF_LEADING_REFERENCE_FRAGMENT_RE.match(stripped)
+                )
+            )
         ):
             # Numbered recital with "Whereas" or "Considering" (translated FR/DE)
             # but no prior zone-marker line. E.g. "(1) Whereas...", "(1) Considering that..."
