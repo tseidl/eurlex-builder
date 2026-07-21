@@ -1,10 +1,11 @@
-# Full EU corpus: R + L + D + COM, 1979 through the configured cutoff
-# ~160K documents. COMs add ~12K; PDF/Docling fallback for pre-1990s.
+# Canonical full EU corpus configuration for the 2026-04-30 cutoff.
 
 metadata:
   project_name: "EU Legislative Corpus 1979-2026"
   author: "Timo Seidl"
-  description: "EU regulations, directives, decisions, and communications from 1979 through the configured 2026 cutoff."
+  description: "EU regulations, directives, decisions, and communications from 1979 through 30 April 2026."
+  date_created: 2026-07-17
+  version: "2026-07-17"
 
 data:
   mode: "descriptive"
@@ -21,17 +22,17 @@ processing:
   text_extraction:
     include_recitals: true
     include_articles: true
-    include_annexes: true            # annexes are stored and exported
+    include_annexes: true
     strip_boilerplate: true
-    article_granularity: paragraph   # split articles into numbered paragraphs ("article" | "paragraph" | "point")
+    article_granularity: paragraph
   translation:
-    translate_full_text: true        # works.full_text (doc-level English version)
-    translate_text_units: true       # text_units.text (per-unit English version)
-    max_full_text_chars: 100000      # skip full_text translation above this size
+    translate_full_text: true
+    translate_text_units: true
+    max_full_text_chars: 100000
   include_relations: true
   fetch_original_relations_for_consolidated: true
   parallel: true
-  max_workers: 8
+  max_workers: 4
 
 output:
   formats:
