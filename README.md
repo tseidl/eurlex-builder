@@ -655,10 +655,7 @@ The DOI above is the Zenodo *concept DOI*, which always points to the latest rel
 - **Dataset linkage layer.** Left-join helpers to enrich our `works` table with EUPROPS (manually curated text resource), EUPLEX (complexity indicators), and EUPOL (policy domain coding) via CELEX ID — combining their derived columns with our structured text for the same acts.
 - **Pittsburgh Archive fallback** ([Archive of European Integration](https://aei.pitt.edu/)) as a secondary content source for documents that EUR-Lex cannot serve. The Pittsburgh archive holds digitised early-period European Community materials (1950s–1990s) that occasionally fill EUR-Lex gaps.
 - **Gated OCR/VLM fallback for the residual failure set.** Keep OCR disabled by default and consider it only when official HTML is absent or low-information and Docling/PyMuPDF fails to recover the requested structure. Start with a bounded canary, record model/version/input/output hashes and cost, emit faithful Markdown, and accept it only when the existing deterministic parser gains a requested structure without regressions. Benchmark managed [Mistral OCR](https://docs.mistral.ai/models/model-cards/ocr-4-0) against local [GLM-OCR](https://github.com/zai-org/GLM-OCR) before selecting a backend.
-- **Granite Docling 258M VLM pipeline** for higher-quality scanned-PDF extraction (especially relevant for the pre-1990 corpus where Docling's default layout model struggles).
-- **Fine-tuning Opus-MT** on JRC-Acquis / DGT Translation Memory for better legal-translation quality on the non-English portion of the corpus.
 - **Incremental update mode** — delta runs that fetch only acts adopted since the last completed run.
-- **Kreuzberg** as a faster alternative PDF backend for the cases where Docling layout-awareness isn't needed.
 
 ## License
 
