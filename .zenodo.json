@@ -1,0 +1,21 @@
+{
+  "title": "eurlex-builder: a configurable Python pipeline for EU legislative datasets",
+  "description": "<p>eurlex-builder turns the EUR-Lex / Cellar corpus into provision-level Parquet tables for quantitative research. It fetches directives, regulations, decisions, and communications, extracts text at configurable granularity (article, numbered paragraph, or lettered point) across EUR-Lex's heterogeneous document formats, collects metadata and inter-document relations, and includes guarded Opus-MT translation for non-English documents. Output is one DuckDB file plus four Parquet tables. The package accompanies Seidl and Kosti (2026), \"Mapping Europe's Digital Acquis: A Granular History of EU Digital Policymaking\".</p>",
+  "upload_type": "software",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Seidl, Timo",
+      "affiliation": "Technical University of Munich",
+      "orcid": "0000-0001-6895-7114"
+    }
+  ],
+  "keywords": [
+    "European Union",
+    "EUR-Lex",
+    "legislation",
+    "text as data",
+    "political science",
+    "natural language processing"
+  ]
+}

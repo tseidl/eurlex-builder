@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: >-
+  If you use eurlex-builder, please cite it. For reproducibility, cite the
+  Zenodo version DOI of the release you actually used; the concept DOI below
+  identifies the package as a whole.
+title: "eurlex-builder: a configurable Python pipeline for EU legislative datasets"
+type: software
+authors:
+  - family-names: Seidl
+    given-names: Timo
+    affiliation: Technical University of Munich
+    orcid: "https://orcid.org/0000-0001-6895-7114"
+repository-code: "https://github.com/tseidl/eurlex-builder"
+license: MIT
+keywords:
+  - European Union
+  - EUR-Lex
+  - legislation
+  - text as data
+  - political science
+# doi: 10.5281/zenodo.XXXXXXX   # concept DOI — fill in after first Zenodo release
