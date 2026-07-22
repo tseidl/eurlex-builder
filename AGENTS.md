@@ -65,3 +65,10 @@ eurlex-builder validate <db>
 - Relations cached from metadata SPARQL to avoid duplicate queries
 - Stable text-unit keys combine CELEX and structural coordinates; `unit_order` preserves document order
 - Run manifests store the validated config hash, Git state, and dependency versions in DuckDB
+
+## Releases and citation
+
+- Push to `main` freely; GitHub releases are deliberate. Every release is automatically archived on Zenodo and mints a permanent version DOI, so do not release for README/docs, CI, or metadata-only changes.
+- Cut a release when: a fresh run would produce different data than the last release (extraction, fetching, translation, or schema changes); a user-facing feature lands; or a dataset built from the current state needs a citable version DOI (paper replication).
+- Versioning: bump `version` in `pyproject.toml` and tag `vX.Y.Z` to match. Patch = fixes that don't change run outputs; minor = output-affecting changes or new features (e.g. the modern COM-template fixes → v0.2.0); major = breaking config or schema changes.
+- Cite the concept DOI `10.5281/zenodo.21496963` by default; version DOIs belong only in replication materials tied to the specific release that built the data.
