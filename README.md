@@ -1,5 +1,7 @@
 # eurlex-builder
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21496963.svg)](https://doi.org/10.5281/zenodo.21496963)
+
 > Build research-ready datasets from EU legislative data — recitals, articles, points, and the network between them.
 
 `eurlex-builder` is a configurable Python pipeline that turns the [EUR-Lex / Cellar](https://eur-lex.europa.eu/) corpus into provision-level Parquet tables for quantitative research. It fetches every directive, regulation, decision, or communication you ask for, extracts text at the granularity you need (whole article, numbered paragraph, or lettered point), collects metadata + inter-document relations, and ships the result as one DuckDB file plus four Parquet tables.
@@ -629,7 +631,7 @@ If you use this package, please cite the accompanying paper and the software:
   year    = {2026},
   url     = {https://github.com/tseidl/eurlex-builder},
   version = {0.1.0},
-  doi     = {10.5281/zenodo.XXXXXXX}
+  doi     = {10.5281/zenodo.21496963}
 }
 ```
 
