@@ -821,6 +821,15 @@ class Pipeline:
             if fetch_result and fetch_result[1] == "pdf":
                 self._apply_pdf_provenance(metadata, extract_meta)
 
+        # No extractor branch for this document type (e.g. sector-6 case law):
+        # metadata and full text are stored, but no text units are produced.
+        elif raw_content:
+            logger.warning(
+                "No structural extractor for document_type '%s' (%s); "
+                "storing metadata and full text only, text units will be empty",
+                doc_type, celex_id,
+            )
+
         # Strip boilerplate from last article, drop empty units.
         if text_cfg.strip_boilerplate and units:
             for i in range(len(units) - 1, -1, -1):

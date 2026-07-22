@@ -7,6 +7,13 @@ from pathlib import Path
 
 from eurlex_builder.constants import TEXT_UNIT_IDENTITY_COLUMNS
 from eurlex_builder.translate import translation_quality_issue
+from eurlex_builder.utils import COM_STYLE_DOC_TYPES, STRUCTURAL_DOC_TYPES
+
+
+# Document types with an extractor branch; anything else stores full text only.
+_SUPPORTED_DOC_TYPE_SQL = ", ".join(
+    f"'{t}'" for t in sorted(STRUCTURAL_DOC_TYPES | COM_STYLE_DOC_TYPES)
+)
 
 
 def validate_database(db_path: str | Path) -> list[dict[str, object]]:
@@ -186,6 +193,20 @@ def _validate_connection(conn) -> list[dict[str, object]]:
                FROM works w JOIN text_units t USING (celex_id)
                WHERE w.document_type IN ('regulation', 'directive', 'decision')
                  AND t.type = 'body'""",
+        ),
+        (
+            "error", "content_without_text_units",
+            """SELECT count(*) FROM works w
+               WHERE w.full_text IS NOT NULL AND w.full_text != ''
+                 AND NOT EXISTS (
+                     SELECT 1 FROM text_units t WHERE t.celex_id = w.celex_id
+                 )""",
+        ),
+        (
+            "warning", "unextractable_document_type",
+            f"""SELECT count(*) FROM works
+                WHERE document_type IS NOT NULL
+                  AND document_type NOT IN ({_SUPPORTED_DOC_TYPE_SQL})""",
         ),
     ]
     for severity, code, query in checks:

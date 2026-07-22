@@ -104,6 +104,40 @@ def test_validate_reports_marker_only_recital(store):
     assert "marker_only_recital" in codes
 
 
+def test_validate_flags_unextractable_type_with_content_and_no_units(store):
+    store.save_work({
+        "celex_id": "62018CJ0311",
+        "document_type": "unknown",
+        "full_text": "Judgment of the Court (Grand Chamber).",
+    })
+    store.mark_processed("62018CJ0311")
+
+    issues = _validate_connection(store.conn)
+
+    by_code = {issue["code"]: issue for issue in issues}
+    assert by_code["content_without_text_units"]["severity"] == "error"
+    assert by_code["unextractable_document_type"]["severity"] == "warning"
+
+
+def test_validate_allows_empty_content_and_supported_types(store):
+    # Unfetchable documents are kept as rows with empty content columns;
+    # they must not be flagged as silent extraction failures.
+    store.save_work({"celex_id": "X1", "document_type": "regulation"})
+    store.save_work({
+        "celex_id": "X2", "document_type": "communication", "full_text": "text",
+    })
+    store.save_text_units("X2", [
+        {"type": "paragraph", "number": "1", "text": "text"},
+    ])
+    store.mark_processed("X1")
+    store.mark_processed("X2")
+
+    codes = {issue["code"] for issue in _validate_connection(store.conn)}
+
+    assert "content_without_text_units" not in codes
+    assert "unextractable_document_type" not in codes
+
+
 def test_validate_reports_recorded_translation_rejection(store):
     store.save_work({"celex_id": "X1", "full_text": "Texte source."})
     store.save_text_units("X1", [{

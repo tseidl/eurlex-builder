@@ -562,6 +562,22 @@ The legislative PDF extractor uses English-only markers (`Whereas:`, `HAS ADOPTE
 
 ---
 
+## Verification status
+
+The configuration accepts six document types plus raw CELEX IDs, but they are not equally validated. A smoke test (July 2026, v0.1.0, 17 documents spanning 1962–2021; full report in [docs/doc-type-verification.md](docs/doc-type-verification.md)) established:
+
+| Document type | Status |
+|---|---|
+| **Regulations, directives, decisions** | **Validated.** Repeated full-corpus runs with structural QA against official documents. This is the path the accompanying paper is built on. |
+| **Communications (DC)** | Verified for single-stream HTML across eras (88–98% text coverage). Known gaps: HTTP-300 annex streams are not merged into the act stream, and long archival PDFs can fall back to coarse page-scale chunks after a Docling timeout. |
+| **Proposals (PC)** | Older samples (1995, 1998) extract nearly completely. Modern legislative-proposal templates (DSA, AI Act era) are **broken**: recitals, article headings, and points use CSS classes the COM extractor does not handle, and separate annex streams are dropped. |
+| **Staff working documents (SC)** | Older single-stream samples extract at ~97%. Modern multipart impact assessments are **broken**: the `Numbered-Para` body class is skipped and the second HTML part is discarded entirely. |
+| **Case law (sector 6: CJ/CC/CO)** | **Unsupported.** Fixed mode fetches metadata, relations, and full text, but produces zero text units — silently, with exit 0. Descriptive mode cannot discover sector-6 documents at all. |
+
+`eurlex-builder validate` flags the silent-failure cases: a work with stored full text but zero text units is an **error** (exit 1), and a document type outside the supported extraction set is a **warning**; the pipeline also logs a warning at run time when a document has no extractor branch. What validation still cannot measure is extraction *coverage* — a database whose modern proposals silently lost their recitals to unhandled CSS classes passes, because no source-text baseline is stored. Do not read a passing validation as evidence that an unverified document type extracted completely.
+
+---
+
 ## Architecture
 
 ```
@@ -612,9 +628,12 @@ If you use this package, please cite the accompanying paper and the software:
   title   = {eurlex-builder: a configurable Python pipeline for EU legislative datasets},
   year    = {2026},
   url     = {https://github.com/tseidl/eurlex-builder},
-  version = {0.1.0}
+  version = {0.1.0},
+  doi     = {10.5281/zenodo.XXXXXXX}
 }
 ```
+
+The DOI above is the Zenodo *concept DOI*, which always points to the latest release. For reproducibility, cite the *version DOI* of the release you actually used (listed on the Zenodo record) and state the version number. See also [`CITATION.cff`](CITATION.cff).
 
 ---
 
@@ -631,6 +650,8 @@ If you use this package, please cite the accompanying paper and the software:
 ## Roadmap
 
 - **Discovery by resource-type, not just CELEX-type.** Today's descriptive mode filters by CELEX type code (D, R, L) + sector. EUR-Lex also exposes `work_has_resource-type` URIs (`DEC`, `DEC_IMPL`, `DEC_DEL`, `REG_FINANC`, …) which form a *semantic* classification overlapping but not identical to the CELEX letter. Adding `type_basis: celex | resource_type | both` to the YAML — with explicit per-doc-type `resource_types` lists — would let researchers opt into broader sets (e.g. merger decisions with CELEX-type `M`, budget decisions with `B`, framework decisions, joint decisions). Default stays CELEX so existing configs reproduce the same corpus.
+- **Modern COM-template support.** The July 2026 smoke test (see **Verification status**) found that current proposal and impact-assessment templates use CSS classes the COM extractor skips (`li ManualConsidrant` recitals, `Titrearticle` article headings, `li Point*`, `li Numbered-Para`), and that HTTP-300 multipart representations are truncated to the first stream (annexes and part-2 files are never fetched). Fixing both would make DSA/AI-Act-era proposals and impact assessments extractable.
+- **Case-law extraction (sector 6).** CJ/CC/CO documents currently map to `unknown` and yield zero text units. Judgments have their own stable structure (grounds, decision on costs, operative part) that a dedicated extractor could target; descriptive mode would also need case-law entries in the `document_types` mapping.
 - **Dataset linkage layer.** Left-join helpers to enrich our `works` table with EUPROPS (manually curated text resource), EUPLEX (complexity indicators), and EUPOL (policy domain coding) via CELEX ID — combining their derived columns with our structured text for the same acts.
 - **Pittsburgh Archive fallback** ([Archive of European Integration](https://aei.pitt.edu/)) as a secondary content source for documents that EUR-Lex cannot serve. The Pittsburgh archive holds digitised early-period European Community materials (1950s–1990s) that occasionally fill EUR-Lex gaps.
 - **Gated OCR/VLM fallback for the residual failure set.** Keep OCR disabled by default and consider it only when official HTML is absent or low-information and Docling/PyMuPDF fails to recover the requested structure. Start with a bounded canary, record model/version/input/output hashes and cost, emit faithful Markdown, and accept it only when the existing deterministic parser gains a requested structure without regressions. Benchmark managed [Mistral OCR](https://docs.mistral.ai/models/model-cards/ocr-4-0) against local [GLM-OCR](https://github.com/zai-org/GLM-OCR) before selecting a backend.
