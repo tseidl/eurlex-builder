@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import sys
 
-from eurlex_builder.extractors.html import HtmlExtractor
 from eurlex_builder.errors import TransientSourceError
+from eurlex_builder.extractors.html import HtmlExtractor
 from eurlex_builder.pipeline import (
     Pipeline,
     _merge_pdf_structure_improvements,
@@ -412,8 +412,9 @@ def test_pdf_quality_startup_failure_keeps_primary_html(monkeypatch):
 
 
 def test_fatal_docling_startup_stops_sequential_run(monkeypatch):
-    import pytest
     from unittest.mock import Mock
+
+    import pytest
 
     from eurlex_builder.errors import DoclingStartupError
 
@@ -433,6 +434,7 @@ def test_fatal_docling_startup_stops_sequential_run(monkeypatch):
 
 def test_run_manifest_is_marked_failed_on_discovery_error(store, monkeypatch):
     import duckdb
+
     from eurlex_builder.config import Config
 
     class DiscoveryFailure:
@@ -547,8 +549,9 @@ def test_resume_limit_processes_bounded_subset_without_narrowing_selection(
 
 
 def test_programmatic_limit_rejects_fresh_run():
-    import pytest
     from unittest.mock import Mock
+
+    import pytest
 
     from eurlex_builder.config import Config
 
@@ -562,9 +565,10 @@ def test_programmatic_limit_rejects_fresh_run():
 
 
 def test_parallel_interrupt_does_not_persist_or_checkpoint(monkeypatch):
-    import pytest
     from types import SimpleNamespace
     from unittest.mock import Mock
+
+    import pytest
 
     import eurlex_builder.pipeline as pipeline_module
     import eurlex_builder.sources.cellar as cellar_module
@@ -685,6 +689,7 @@ def test_empty_missing_content_report_removes_stale_files(tmp_path):
 
 def test_pipeline_run_end_to_end_with_manifest_and_exports(tmp_path, monkeypatch):
     import duckdb
+
     from eurlex_builder.config import Config
     from eurlex_builder.storage.duckdb import DuckDBStore
     from eurlex_builder.validate import validate_database

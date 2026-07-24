@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from lxml import etree
 
-from eurlex_builder.extractors.html import HtmlExtractor, _INLINE_REF_START_RE, _walk_article_body
+from eurlex_builder.extractors.html import (
+    _INLINE_REF_START_RE,
+    HtmlExtractor,
+    _walk_article_body,
+)
 from eurlex_builder.extractors.pdf import (
     PdfExtractor,
     _article_sequence_is_complete,
@@ -22,7 +26,6 @@ from eurlex_builder.extractors.pdf import (
     _repair_embedded_operative_markers,
 )
 from eurlex_builder.pipeline import _should_run_translate_fallback
-
 
 _STUB_WORKER = "tests.docling_worker_stub"
 
@@ -587,6 +590,7 @@ def test_translate_markdown_skips_oj_footnote_refs(monkeypatch):
 def test_translation_model_clears_superseded_max_length(monkeypatch):
     import sys
     from types import SimpleNamespace
+
     from eurlex_builder import translate as tr
 
     tokenizer = object()
@@ -2152,6 +2156,7 @@ def test_html_body_fallback_respects_disabled_articles():
 def test_pymupdf_fallback_exposes_text_for_translation(monkeypatch, tmp_path):
     import sys
     from types import SimpleNamespace
+
     import eurlex_builder.extractors.pdf as pdf_module
     from eurlex_builder.extractors.pdf import PdfExtractor, _DoclingResult
 
@@ -2193,6 +2198,7 @@ def test_pymupdf_fallback_exposes_text_for_translation(monkeypatch, tmp_path):
 
 def test_partial_conversion_result_is_not_success():
     from types import SimpleNamespace
+
     from eurlex_builder.extractors.pdf import _conversion_result_error
 
     result = SimpleNamespace(
@@ -2263,6 +2269,7 @@ def test_persistent_worker_rejects_partial_result(tmp_path):
 
 def test_persistent_worker_reports_crash_without_stalling(tmp_path):
     import time
+
     from eurlex_builder.extractors.pdf import _DoclingWorkerClient
 
     source = tmp_path / "crash.pdf"
@@ -2304,6 +2311,7 @@ def test_persistent_worker_reports_startup_error(tmp_path):
 
 def test_complete_control_pipe_garbage_fails_without_stalling(tmp_path):
     import time
+
     from eurlex_builder.extractors.pdf import _DoclingWorkerClient
 
     source = tmp_path / "garbage.pdf"
@@ -2325,6 +2333,7 @@ def test_complete_control_pipe_garbage_fails_without_stalling(tmp_path):
 
 def test_partial_control_pipe_line_obeys_deadline(tmp_path):
     import time
+
     from eurlex_builder.extractors.pdf import _DoclingWorkerClient
 
     source = tmp_path / "partial-line.pdf"
@@ -2345,6 +2354,7 @@ def test_partial_control_pipe_line_obeys_deadline(tmp_path):
 
 def test_three_consecutive_startup_failures_open_circuit(monkeypatch):
     import pytest
+
     import eurlex_builder.extractors.pdf as pdf_module
     from eurlex_builder.errors import DoclingStartupError
     from eurlex_builder.extractors.pdf import _DoclingResult
@@ -2371,6 +2381,7 @@ def test_three_consecutive_startup_failures_open_circuit(monkeypatch):
 
 def test_persistent_worker_timeout_reaps_child(tmp_path):
     import time
+
     from eurlex_builder.extractors.pdf import _DoclingWorkerClient
 
     source = tmp_path / "hang.pdf"
@@ -2392,6 +2403,7 @@ def test_persistent_worker_timeout_reaps_child(tmp_path):
 
 def test_eight_worker_clients_run_concurrently_without_leaks(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
+
     from eurlex_builder.extractors.pdf import _DoclingWorkerClient
 
     def convert(index):
@@ -2416,6 +2428,7 @@ def test_eight_worker_clients_run_concurrently_without_leaks(tmp_path):
 def test_close_interrupts_active_worker_without_waiting_for_deadline(tmp_path):
     import time
     from concurrent.futures import ThreadPoolExecutor
+
     from eurlex_builder.extractors.pdf import _DoclingWorkerClient
 
     source = tmp_path / "hang-close.pdf"
@@ -2443,6 +2456,7 @@ def test_close_interrupts_active_worker_without_waiting_for_deadline(tmp_path):
 
 def test_force_close_blocks_late_worker_creation():
     import pytest
+
     import eurlex_builder.extractors.pdf as pdf_module
 
     pdf_module.close_all_docling_workers(force=True)

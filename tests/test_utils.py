@@ -39,6 +39,7 @@ def test_document_type():
 
 def test_rate_limiter_enforces_interval_across_calls():
     import time
+
     from eurlex_builder.utils import RateLimiter
 
     limiter = RateLimiter(0.05)

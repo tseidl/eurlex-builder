@@ -149,7 +149,7 @@ def _enrich_one(
     categories: set[str] | frozenset[str],
 ) -> dict:
     """Run enrichment SPARQL and require category completion sentinels."""
-    from eurlex_builder.sources.cellar import _sparql_query, _parse_value
+    from eurlex_builder.sources.cellar import _parse_value, _sparql_query
 
     result = _sparql_query(
         query, label=f"Enrich {celex_id}", raise_on_failure=True,

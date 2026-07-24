@@ -48,6 +48,7 @@ def main() -> None:
                     DocumentConverter,
                     PdfFormatOption,
                 )
+
                 from eurlex_builder.extractors.pdf import _conversion_result_error
 
                 torch.set_num_threads(2)

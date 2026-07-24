@@ -16,12 +16,12 @@ import re
 
 from lxml import etree, html
 
-from eurlex_builder.utils import normalize_html_encoding_declaration, normalize_string
 from eurlex_builder.extractors.splitter import (
     _find_quoted_regions,
     _is_in_quoted_region,
     split_article,
 )
+from eurlex_builder.utils import normalize_html_encoding_declaration, normalize_string
 
 logger = logging.getLogger("eurlex_builder")
 

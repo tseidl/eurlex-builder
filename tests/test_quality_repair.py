@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from eurlex_builder.storage.duckdb import DuckDBStore
 from scripts.prepare_quality_repair import prepare_quality_repair
 from scripts.prepare_structural_repair import prepare_structural_repair
-from eurlex_builder.storage.duckdb import DuckDBStore
 
 
 def test_quality_repair_resets_translations_and_targeted_checkpoints(store, tmp_path):

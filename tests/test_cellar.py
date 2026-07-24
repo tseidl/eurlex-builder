@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 import requests
-from datetime import date
 
 from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.sources.cellar import (
-    CellarSource,
     DISCOVERY_TIMEOUT,
     HTML_ACCEPT,
+    CellarSource,
 )
 
 # Minimal HTTP 300 Multiple Choices page with one selectable candidate.

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.enrich import (
     _build_enrich_query,
     _enrich_database_inner,
     _enrich_one,
     _save_enrichment,
 )
+from eurlex_builder.errors import TransientSourceError
 
 
 def _result(celex_id: str, **overrides) -> dict:

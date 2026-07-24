@@ -10,8 +10,8 @@ from urllib.parse import quote
 import requests
 from lxml import etree, html
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from SPARQLWrapper import SPARQLWrapper
+from urllib3.util.retry import Retry
 
 from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.utils import (

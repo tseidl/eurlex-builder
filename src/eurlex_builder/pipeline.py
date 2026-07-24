@@ -14,8 +14,10 @@ from eurlex_builder.config import Config, DescriptiveMode, FixedMode, load_confi
 from eurlex_builder.errors import DoclingStartupError, TransientSourceError
 from eurlex_builder.protocols import Checkpoint, DataSource, Store, TextExtractor
 from eurlex_builder.utils import (
-    is_consolidated_celex, convert_consolidated_to_original,
-    COM_STYLE_DOC_TYPES, STRUCTURAL_DOC_TYPES,
+    COM_STYLE_DOC_TYPES,
+    STRUCTURAL_DOC_TYPES,
+    convert_consolidated_to_original,
+    is_consolidated_celex,
     strip_boilerplate,
 )
 
@@ -279,9 +281,9 @@ class Pipeline:
         config = load_config(path)
 
         # Import here to avoid circular imports
-        from eurlex_builder.sources.cellar import CellarSource
         from eurlex_builder.extractors.html import HtmlExtractor
         from eurlex_builder.extractors.pdf import PdfExtractor
+        from eurlex_builder.sources.cellar import CellarSource
         from eurlex_builder.storage.duckdb import DuckDBStore
 
         output_dir = Path(config.output.output_directory)
@@ -461,9 +463,9 @@ class Pipeline:
         logger.info(f"Parallel mode: {max_workers} workers")
 
         # Each worker gets its own CellarSource (own HTTP session).
-        from eurlex_builder.sources.cellar import CellarSource
-
         import threading
+
+        from eurlex_builder.sources.cellar import CellarSource
         _thread_sources: dict[int, CellarSource] = {}
         _sources_lock = threading.Lock()
 
@@ -959,8 +961,8 @@ class Pipeline:
         out_metadata: dict | None = None,
     ) -> list[dict]:
         """Extract COM paragraphs through the shared isolated PDF path."""
-        from eurlex_builder.extractors.pdf import extract_pdf_markdown
         from eurlex_builder.extractors.html import extract_com_from_text
+        from eurlex_builder.extractors.pdf import extract_pdf_markdown
 
         text = extract_pdf_markdown(
             celex_id, raw_content, out_metadata=out_metadata,

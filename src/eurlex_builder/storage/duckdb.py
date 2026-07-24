@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 import hashlib
 import json
+import logging
 import platform
 import subprocess
 import uuid
@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+
 import duckdb
 
 from eurlex_builder import __version__

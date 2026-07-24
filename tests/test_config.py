@@ -1,6 +1,7 @@
 """Tests for configuration validation."""
 
 import pytest
+
 from eurlex_builder.config import Config
 
 

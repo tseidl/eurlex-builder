@@ -9,7 +9,6 @@ from eurlex_builder.constants import TEXT_UNIT_IDENTITY_COLUMNS
 from eurlex_builder.translate import translation_quality_issue
 from eurlex_builder.utils import COM_STYLE_DOC_TYPES, STRUCTURAL_DOC_TYPES
 
-
 # Document types with an extractor branch; anything else stores full text only.
 _SUPPORTED_DOC_TYPE_SQL = ", ".join(
     f"'{t}'" for t in sorted(STRUCTURAL_DOC_TYPES | COM_STYLE_DOC_TYPES)

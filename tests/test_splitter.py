@@ -8,7 +8,6 @@ from eurlex_builder.extractors.splitter import (
     split_article,
 )
 
-
 # ---------------------------------------------------------------------------
 # Article-level (default) — must reproduce current behavior bit-for-bit.
 # ---------------------------------------------------------------------------

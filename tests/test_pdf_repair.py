@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from scripts.prepare_pdf_repair import PENDING_PREFIX, prepare_pdf_repair
 from eurlex_builder.validate import _validate_connection
+from scripts.prepare_pdf_repair import PENDING_PREFIX, prepare_pdf_repair
 
 
 def test_pdf_repair_marks_resets_and_audits_only_processed_pdf_rows(store, tmp_path):
