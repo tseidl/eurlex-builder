@@ -42,3 +42,7 @@ docs/*.html
 .pytest_cache/
 .coverage
 .python-version
+scripts/figure-hero-card.R
+scripts/figure-decomposition.R
+figure-*.png
+AGENTS.md
