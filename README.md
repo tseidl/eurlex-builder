@@ -11,7 +11,7 @@ It is, to our knowledge, the first open-source tool to extract EU legislative te
 
 The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis: A Granular History of EU Digital Policymaking" (preprint forthcoming on SocArXiv).
 
-![Landmark EU regulations decomposing into recitals and (sub-)articles](figure-decomposition.png)
+![Landmark EU regulations decomposing into recitals and (sub-)articles](https://raw.githubusercontent.com/tseidl/eurlex-builder/main/figure-decomposition.png)
 
 ---
 
