@@ -39,7 +39,7 @@ The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis
 ## Quick start
 
 ```bash
-pip install "eurlex-builder[all] @ git+https://github.com/tseidl/eurlex-builder"
+pip install "eurlex-builder[all]"
 ```
 
 Create a `config.yaml`. You can either request specific acts by CELEX ID (**fixed mode**) or search by date range and document type (**descriptive mode**):
@@ -127,6 +127,22 @@ text_units.filter(
 ## Installation
 
 Requires Python 3.11+.
+
+```bash
+# Core only (HTML extraction + parquet output)
+pip install eurlex-builder
+
+# With PDF support (Docling + pymupdf)
+pip install "eurlex-builder[pdf]"
+
+# With translation (Opus-MT via Hugging Face)
+pip install "eurlex-builder[translate]"
+
+# Everything (recommended for production runs)
+pip install "eurlex-builder[all]"
+```
+
+For development, install from a checkout instead:
 
 ```bash
 git clone https://github.com/tseidl/eurlex-builder.git
