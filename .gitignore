@@ -40,6 +40,8 @@ docs/*.html
 .DS_Store
 .claude/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 .python-version
 scripts/figure-hero-card.R

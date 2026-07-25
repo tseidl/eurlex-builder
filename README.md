@@ -1,6 +1,7 @@
 # eurlex-builder
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21496963.svg)](https://doi.org/10.5281/zenodo.21496963)
+[![CI](https://github.com/tseidl/eurlex-builder/actions/workflows/ci.yml/badge.svg)](https://github.com/tseidl/eurlex-builder/actions/workflows/ci.yml)
 
 > Build research-ready datasets from EU legislative data — recitals, articles, points, and the network between them.
 
@@ -25,12 +26,20 @@ The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis
 - **Auditable runs.** DuckDB stores every validated config, its SHA-256 hash, runtime versions, and completion status; `validate` checks structural integrity without modifying the database.
 - **Parallel mode.** Multi-threaded fetching with `parallel: true`; sequential writes keep DuckDB contention-free.
 
+> **Not every document type is equally supported.** Regulations, directives, and
+> decisions are validated against official documents and are what the
+> accompanying paper is built on. Communications extract well but have known
+> gaps; **proposals (PC) and staff working documents (SC) are broken for modern
+> templates, and case law (sector 6) is unsupported and fails silently.** Read
+> [Verification status](#verification-status) before running anything outside
+> the validated three.
+
 ---
 
 ## Quick start
 
 ```bash
-pip install -e ".[all]"
+pip install "eurlex-builder[all] @ git+https://github.com/tseidl/eurlex-builder"
 ```
 
 Create a `config.yaml`. You can either request specific acts by CELEX ID (**fixed mode**) or search by date range and document type (**descriptive mode**):
@@ -383,7 +392,7 @@ Run read-only integrity checks for checkpoint/work consistency, orphaned rows, s
 | `full_text` | VARCHAR | Full document text (translated to English if non-English source) |
 | `full_text_original` | VARCHAR | Original-language text (non-English docs only) |
 | `full_text_html` | VARCHAR | Raw HTML (only if `store_raw_html: true`) |
-| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). `cellar_html_<lang>__pdf_<lang>_fallback_<structures>` means corroborated units of the named structural types were added from a same-language PDF while HTML text was retained. A `__pymupdf_<reason>` suffix identifies degraded PDF extraction after a Docling timeout, partial result, crash, conversion error, oversize guard, or empty result; `__translated` identifies translate-before-extract output |
+| `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). Suffixes record fallbacks — see below |
 | `date_entry_into_force` | DATE | Populated by `enrich` |
 | `date_end_of_validity` | DATE | Populated by `enrich`; `9999-12-31` if still in force |
 | `is_in_force` | BOOLEAN | Populated by `enrich` |
@@ -394,6 +403,16 @@ Run read-only integrity checks for checkpoint/work consistency, orphaned rows, s
 | `procedure_reference` | VARCHAR | e.g. `2012/0011/COD` |
 | `procedure_legal_basis` | VARCHAR | Treaty legal basis |
 | `enriched_at` | TIMESTAMP | Most recent enrichment timestamp; category completion is tracked internally in `_enrichment_checkpoint` |
+
+**`content_source` suffixes.** The base tag names the format and language that
+supplied the text. Three suffixes record that a fallback path was taken:
+
+- `__pdf_<lang>_fallback_<structures>` — corroborated units of the named
+  structural types were added from a same-language PDF while the HTML text was
+  retained.
+- `__pymupdf_<reason>` — degraded PDF extraction after a Docling timeout,
+  partial result, crash, conversion error, oversize guard, or empty result.
+- `__translated` — translate-before-extract output (see the FAQ).
 
 </details>
 
@@ -444,12 +463,14 @@ Each pipeline invocation records its validated configuration JSON and SHA-256 ha
 <details>
 <summary><strong>How do I speed up large runs?</strong></summary>
 
-Set `parallel: true` and start with `max_workers: 8`. Modern HTML-heavy
-runs are mainly limited by Cellar requests, while older corpora spend much of
-their time in Docling PDF conversion. More workers help only until CPU, memory,
-or the shared Cellar request limit is saturated; 16 workers can be slower on a
-memory-constrained machine. DuckDB writes remain sequential, so workers do not
-contend for the database.
+Set `parallel: true`. The default `max_workers: 4` is what the full corpus run
+actually used, and it is the right starting point for a mixed HTML/PDF corpus
+because each PDF-processing thread owns a Docling worker. Modern HTML-heavy
+runs are mainly limited by Cellar requests and may benefit from 8. More workers
+help only until CPU, memory, or the shared Cellar request limit is saturated;
+16 workers can be slower on a memory-constrained machine. Benchmark on the
+target machine rather than assuming more workers are faster. DuckDB writes
+remain sequential, so workers do not contend for the database.
 
 For a clean rebuild, use a new output directory and let checkpoints make it
 restart-safe. Do not pass `--fresh` again after an interruption. Source PDFs
@@ -525,7 +546,7 @@ They stay in `works` as rows with empty text columns and an entry in `missing_co
 <details>
 <summary><strong>Why DuckDB + Parquet rather than SQLite?</strong></summary>
 
-DuckDB writes columnar Parquet natively (no glue code), reads ~10× faster than SQLite for the analytical queries researchers actually run, and has direct interop with Polars / Arrow / R. The DuckDB file also acts as a single-file checkpoint store so the pipeline is restart-safe.
+DuckDB writes columnar Parquet natively (no glue code), reads faster than SQLite for the analytical queries researchers actually run, and has direct interop with Polars / Arrow / R. The DuckDB file also acts as a single-file checkpoint store so the pipeline is restart-safe.
 
 </details>
 
@@ -606,6 +627,8 @@ config.yaml (Pydantic-validated)
   ├─ Export                     — Polars → Parquet/CSV
   └─ Reports                    — missing-content TSV, extraction stats
 ```
+
+*More on how the six HTML structures are detected and parsed: [extraction approach](docs/extraction-approach-summary.md).*
 
 All data sourced through official EU APIs:
 - **SPARQL**: `https://publications.europa.eu/webapi/rdf/sparql`
