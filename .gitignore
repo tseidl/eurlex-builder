@@ -44,6 +44,4 @@ docs/*.html
 .ruff_cache/
 .coverage
 .python-version
-scripts/figure-hero-card.R
-figure-hero-card.png
 AGENTS.md
