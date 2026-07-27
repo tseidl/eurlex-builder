@@ -26,11 +26,14 @@ The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis
 - **Auditable runs.** DuckDB stores every validated config, its SHA-256 hash, runtime versions, and completion status; `validate` checks structural integrity without modifying the database.
 - **Parallel mode.** Multi-threaded fetching with `parallel: true`; sequential writes keep DuckDB contention-free.
 
-> **Not every document type is equally supported.** Regulations, directives, and
-> decisions are validated against official documents and are what the
-> accompanying paper is built on. Communications extract well but have known
-> gaps; **proposals (PC) and staff working documents (SC) are broken for modern
-> templates, and case law (sector 6) is unsupported and fails silently.** Read
+> **Full-text retrieval works for every document type; granular extraction does
+> not.** Whatever the pipeline reaches, `works.full_text` is fetched and stored —
+> the caveats here concern the decomposition into text units. Regulations,
+> directives, and decisions are validated against official documents and are what
+> the accompanying paper is built on. Communications extract well but have known
+> gaps; **proposals (PC) and staff working documents (SC) lose units to modern
+> templates, and case law (sector 6) yields zero text units — silently** (and is
+> reachable only in fixed mode). Read
 > [Verification status](#verification-status) before running anything outside
 > the validated three.
 
@@ -97,7 +100,7 @@ Run:
 eurlex-builder run config.yaml
 ```
 
-You'll get `output/eurlex_builder.duckdb` plus four Parquet files: `works.parquet`, `text_units.parquet`, `relations.parquet`, `eurovoc.parquet`.
+You'll get `output/eurlex_builder.duckdb` plus four Parquet files: `works.parquet`, `text_units.parquet`, `relations.parquet`, `eurovoc.parquet`. The database filename is always `eurlex_builder.duckdb` — it's the `output_directory` that separates projects, so give each config its own (e.g. `./output/digital-regs`).
 
 ```python
 import polars as pl
