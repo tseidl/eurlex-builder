@@ -1,6 +1,6 @@
 # eurlex-builder
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21496963.svg)](https://doi.org/10.5281/zenodo.21496963)
+[![Software DOI](https://img.shields.io/badge/Software_DOI-10.5281%2Fzenodo.21496963-blue)](https://doi.org/10.5281/zenodo.21496963)
 [![CI](https://github.com/tseidl/eurlex-builder/actions/workflows/ci.yml/badge.svg)](https://github.com/tseidl/eurlex-builder/actions/workflows/ci.yml)
 
 > Build research-ready datasets from EU legislative data — recitals, articles, points, and the network between them.
