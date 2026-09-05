@@ -214,6 +214,12 @@ Both the wheel and source distribution build successfully. The wheel contains
 the new parser and no test/review artifacts; the source archive includes all
 four HTML excerpts and their provenance. Ruff and `git diff --check` pass.
 
+The prepared 0.2.0 implementation commit `cbd20ef` subsequently passed
+[GitHub CI on Python 3.11 and 3.13](https://github.com/tseidl/eurlex-builder/actions/runs/33969382950),
+including the configured mypy check, tests, and builds. Both 0.2.0 distribution
+artifacts also pass `twine check`. The local NumPy-stub issue did not reproduce
+in the supported-version CI environments.
+
 The paper data remain frozen. These output-affecting changes are prepared as
 version 0.2.0 under the project's versioning policy; publication status is
 maintained in [project-state.md](../project-state.md). Multipart

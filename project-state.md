@@ -4,10 +4,13 @@ Updated 5 September 2026. This is the canonical shared current-state file.
 
 The paper dataset and its version-specific Zenodo software archive remain
 frozen. Do not rebuild or repair those data as part of package maintenance.
-Both package version fields now declare **0.2.0**. The September maintenance
-changes and release preparation are being committed and pushed to `main` at the
-user's request. Publication remains pending: no `v0.2.0` tag, GitHub Release,
-PyPI upload, or Zenodo record has been created for this work.
+Both package version fields declare **0.2.0**. The September maintenance changes
+and release preparation were committed as
+[`cbd20ef`](https://github.com/tseidl/eurlex-builder/commit/cbd20eff21a761c0ba6dfbe662937a7c8c22609e)
+and pushed to `origin/main`. [CI passed on Python 3.11 and 3.13](https://github.com/tseidl/eurlex-builder/actions/runs/33969382950),
+including lint, the configured type check, tests, and builds. Publication remains
+pending: no `v0.2.0` tag, GitHub Release, PyPI upload, or Zenodo record has been
+created for this work.
 
 The prepared release is **0.2.0**, to be tagged **v0.2.0**, with the title
 “eurlex-builder 0.2.0 — HTML extraction refinements and reliability fixes”.
@@ -40,7 +43,8 @@ changes. The parser-only refactor matched all 2,100 comparisons; the completed
 fixes have 75 explained output changes and preserve previously extracted words
 in order. Extended sampling confirmed restored article text in three
 consolidated documents. This does not estimate prevalence or paper-result
-sensitivity. The complete suite has 336 passing tests; see the
+sensitivity. The complete local suite has 336 passing tests, and the 0.2.0 wheel
+and source archive pass `twine check`. Supported-version CI also passes; see the
 [review and implementation evidence](docs/quality-review-2026-09-05.md#implementation-follow-up)
 for scope, source provenance, and local type-check limitations.
 
