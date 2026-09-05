@@ -1,12 +1,33 @@
-# eurlex-builder 0.2.0 — HTML extraction refinements and reliability fixes
+# eurlex-builder 0.2.0 — HTML refinements and optional multilingual extraction
 
 This release improves handling of specific HTML layouts and makes corpus
 selection and run status more explicit. It also simplifies HTML parsing while
-retaining the existing extraction strategies.
+retaining the existing extraction strategies, and adds an optional command for
+collecting aligned official language versions.
 
 Fresh runs may include text that earlier versions omitted in affected layouts,
-or corrected subparagraph boundaries. Configuration fields and database schema
-are unchanged.
+or corrected subparagraph boundaries. Existing configuration fields and the
+analytical database schema are unchanged.
+
+## Optional multilingual extraction
+
+`eurlex-builder multilingual <db> --languages eng deu fra` collects the requested
+official HTML language versions for documents in an existing dataset. It reads
+the input database without modifying it and saves a separate DuckDB database
+and Parquet/CSV exports. The usual extraction and translation workflow keeps
+its existing behavior.
+
+- Align whole articles and directly anchored numbered paragraphs using their
+  source identifiers. Retain source HTML, URLs, hashes and retrieval times.
+- Resume by document and language, and report language coverage plus unavailable
+  or unsupported HTML explicitly. This path does not use machine translation.
+- Legacy layouts without supported identifiers, PDFs, recitals, annexes and
+  point-level alignment are outside this mode. Some consolidated texts support
+  article-level alignment only.
+
+Thanks to [@Chenjigaram](https://github.com/Chenjigaram) for suggesting this in
+[issue #1](https://github.com/tseidl/eurlex-builder/issues/1), sharing the
+cross-language checks, and offering to help implement it.
 
 ## Extraction fixes
 
@@ -40,7 +61,7 @@ are unchanged.
 
 ## Validation
 
-The local suite passes 336 tests. The HTML comparison covers 55 downloaded
+The local suite passes 375 tests. The HTML comparison covers 55 downloaded
 Cellar streams and existing fixtures across six languages and all six
 extraction structures, producing 2,100 comparisons across extraction settings.
 The parser-only refactor preserves every compared output. The completed fixes
@@ -51,6 +72,14 @@ Within this sample, article-text corrections affected 14 articles across three
 consolidated documents. These counts do not estimate the frequency of such
 omissions across EUR-Lex or in existing datasets. The comparison provides
 regression evidence rather than a completeness guarantee for every document.
+
+A separate multilingual check covered 20 document/language pairs across DORA,
+UCITS, GDPR and a dated GDPR consolidation in five languages. Supported source
+identifier sets matched English. The check also confirmed the Croatian UCITS
+layout exception and unavailable Irish UCITS HTML; five consolidated versions
+supported article-level extraction only. Tests verify preservation of the input
+database, resumption and incomplete language coverage. See the
+[multilingual validation record](https://github.com/tseidl/eurlex-builder/blob/main/docs/multilingual-validation-2026-09-05.json).
 
 ## Reproducibility
 
