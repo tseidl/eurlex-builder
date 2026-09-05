@@ -5,13 +5,19 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from tqdm import tqdm
 
+from eurlex_builder import __version__
 from eurlex_builder.config import Config, DescriptiveMode, FixedMode, load_config
-from eurlex_builder.errors import DoclingStartupError, TransientSourceError
+from eurlex_builder.errors import (
+    DoclingStartupError,
+    SelectionError,
+    TransientSourceError,
+)
 from eurlex_builder.protocols import Checkpoint, DataSource, Store, TextExtractor
 from eurlex_builder.utils import (
     COM_STYLE_DOC_TYPES,
@@ -22,6 +28,14 @@ from eurlex_builder.utils import (
 )
 
 logger = logging.getLogger("eurlex_builder")
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """Document outcomes for one invocation, excluding historical checkpoints."""
+
+    processed: int = 0
+    failed: int = 0
 
 
 def _structure_profile(units: list[dict]) -> tuple[int, int, int]:
@@ -306,7 +320,7 @@ class Pipeline:
         resume: bool = False,
         retry_failed: bool = False,
         limit: int | None = None,
-    ) -> None:
+    ) -> RunResult:
         """Run the pipeline."""
         if limit is not None and limit < 1:
             raise ValueError("limit must be at least 1")
@@ -323,7 +337,7 @@ class Pipeline:
             if limit is not None:
                 manifest_config["_run_options"] = {"limit": limit}
             run_id = self.store.start_run(manifest_config)
-            self._run_impl(
+            return self._run_impl(
                 run_id=run_id,
                 resume=resume,
                 retry_failed=retry_failed,
@@ -350,18 +364,18 @@ class Pipeline:
         resume: bool,
         retry_failed: bool,
         limit: int | None = None,
-    ) -> None:
-        logger.info(f"eurlex-builder v0.1.0 — {self.config.metadata.project_name}")
+    ) -> RunResult:
+        logger.info(f"eurlex-builder v{__version__} — {self.config.metadata.project_name}")
+
+        celex_ids = self._resolve_ids()
+        self._selected_ids = set(celex_ids)
+        logger.info(f"Found {len(celex_ids)} documents to process.")
 
         if retry_failed:
             reset_count = self.checkpoint.reset_failed()
             if reset_count:
                 logger.info(f"Reset {reset_count} failed document(s) for retry.")
             resume = True
-
-        celex_ids = self._resolve_ids()
-        self._selected_ids = set(celex_ids)
-        logger.info(f"Found {len(celex_ids)} documents to process.")
 
         if not resume:
             reset_count = self.checkpoint.reset_ids(celex_ids)
@@ -380,13 +394,14 @@ class Pipeline:
             )
             celex_ids = celex_ids[:limit]
 
+        outcome = RunResult()
         try:
             if not celex_ids:
                 logger.info("Nothing to process.")
             elif self.config.processing.parallel and len(celex_ids) > 1:
-                self._run_parallel(celex_ids)
+                outcome = self._run_parallel(celex_ids)
             else:
-                self._run_sequential(celex_ids)
+                outcome = self._run_sequential(celex_ids)
         except BaseException:
             from eurlex_builder.extractors.pdf import close_all_docling_workers
 
@@ -412,7 +427,7 @@ class Pipeline:
             logger.debug("Translation not available (install eurlex-builder[translate])")
 
         summary = self.checkpoint.get_summary()
-        run_status = "complete_with_failures" if summary.get("failed", 0) else "complete"
+        run_status = "complete_with_failures" if outcome.failed else "complete"
         self.store.finish_run(run_id, run_status)
 
         logger.info("Exporting results...")
@@ -422,11 +437,13 @@ class Pipeline:
         )
 
         logger.info(
-            f"Done. Processed: {summary.get('processed', 0)}, "
-            f"Failed: {summary.get('failed', 0)}"
+            f"Done. Processed this run: {outcome.processed}, Failed: {outcome.failed}"
         )
 
-        failed_details = summary.get("failed_details", {})
+        failed_details = {
+            cid: error for cid, error in summary.get("failed_details", {}).items()
+            if cid in celex_ids
+        }
         if failed_details:
             logger.warning("Failed documents:")
             for celex_id, error in failed_details.items():
@@ -434,32 +451,39 @@ class Pipeline:
 
         self._report_missing_content()
         self._report_extraction_stats()
+        return outcome
 
     # ------------------------------------------------------------------
     # Sequential mode
     # ------------------------------------------------------------------
 
-    def _run_sequential(self, celex_ids: list[str]) -> None:
+    def _run_sequential(self, celex_ids: list[str]) -> RunResult:
+        processed = failed = 0
         for celex_id in tqdm(celex_ids, desc="Processing documents"):
             try:
                 self._process_one(celex_id)
                 self.checkpoint.mark_processed(celex_id)
+                processed += 1
             except DoclingStartupError as exc:
                 if exc.fatal:
                     raise
                 logger.error("Failed to process %s: %s", celex_id, exc)
                 self.checkpoint.mark_failed(celex_id, str(exc))
+                failed += 1
             except Exception as e:
                 logger.error(f"Failed to process {celex_id}: {e}")
                 self.checkpoint.mark_failed(celex_id, str(e))
+                failed += 1
+        return RunResult(processed, failed)
 
     # ------------------------------------------------------------------
     # Parallel mode
     # ------------------------------------------------------------------
 
-    def _run_parallel(self, celex_ids: list[str]) -> None:
+    def _run_parallel(self, celex_ids: list[str]) -> RunResult:
         """Fetch and parse in parallel threads, write to DB sequentially."""
         max_workers = self.config.processing.max_workers
+        processed = failed = 0
         logger.info(f"Parallel mode: {max_workers} workers")
 
         # Each worker gets its own CellarSource (own HTTP session).
@@ -508,14 +532,17 @@ class Pipeline:
                             # clear stale extraction rows only after a fetch.
                             self._persist_result(celex_id, result)
                             self.checkpoint.mark_processed(celex_id)
+                            processed += 1
                         except DoclingStartupError as exc:
                             if exc.fatal:
                                 raise
                             logger.error("Failed to process %s: %s", celex_id, exc)
                             self.checkpoint.mark_failed(celex_id, str(exc))
+                            failed += 1
                         except Exception as e:
                             logger.error(f"Failed to process {celex_id}: {e}")
                             self.checkpoint.mark_failed(celex_id, str(e))
+                            failed += 1
                         pbar.update(1)
                         submit_next()
         except BaseException:
@@ -531,6 +558,7 @@ class Pipeline:
         finally:
             for source in _thread_sources.values():
                 source.session.close()
+        return RunResult(processed, failed)
 
     # ------------------------------------------------------------------
     # Shared logic
@@ -559,9 +587,10 @@ class Pipeline:
                     all_uris.update(concepts.keys())
 
                 if not all_uris:
-                    logger.warning(
-                        "No EuroVoc concepts matched any keywords — "
-                        "query will run without keyword filter."
+                    raise SelectionError(
+                        "No EuroVoc concepts matched the configured keywords. "
+                        "Check filter_keywords, or set it to [] to search by date "
+                        "and document type without a keyword filter."
                     )
                 elif self.config.processing.automated_mode:
                     # Automated: accept all matches.
@@ -577,9 +606,10 @@ class Pipeline:
                         eurovoc_map, self.source,
                     )
                     if not eurovoc_uris:
-                        logger.warning(
-                            "All EuroVoc concepts rejected — "
-                            "query will run without keyword filter."
+                        raise SelectionError(
+                            "No EuroVoc concepts were selected. Select a concept, "
+                            "or set filter_keywords to [] to search by date and "
+                            "document type without a keyword filter."
                         )
 
             return self.source.resolve_celex_ids(
@@ -594,13 +624,17 @@ class Pipeline:
         raise ValueError(f"Unknown data mode: {data}")
 
     @staticmethod
-    def _unpack_content(fetch_result, metadata: dict) -> tuple[bytes | None, dict]:
+    def _unpack_content(
+        fetch_result, metadata: dict, *, store_raw_html: bool = True,
+    ) -> tuple[bytes | None, dict]:
         """Unpack fetch_content result into raw bytes and updated metadata."""
         if fetch_result is not None:
             raw, content_type, language = fetch_result
             # Only store decoded HTML in full_text_html; PDF bytes are not useful as text.
-            if content_type == "html":
-                metadata["full_text_html"] = raw.decode("utf-8", errors="replace")
+            if content_type == "html" and store_raw_html:
+                from eurlex_builder.html_parser import decode_html
+
+                metadata["full_text_html"] = decode_html(raw)
             else:
                 metadata["full_text_html"] = None
             metadata["content_source"] = f"cellar_{content_type}_{language}"
@@ -645,7 +679,9 @@ class Pipeline:
 
         metadata = source.fetch_metadata(celex_id)
         fetch_result = source.fetch_content(celex_id)
-        raw_content, metadata = self._unpack_content(fetch_result, metadata)
+        raw_content, metadata = self._unpack_content(
+            fetch_result, metadata, store_raw_html=text_cfg.store_raw_html,
+        )
         doc_type = metadata.get("document_type", "")
 
         # Full text (always, when content exists).
@@ -653,10 +689,6 @@ class Pipeline:
         if raw_content:
             full_text = self._extract_full_text(raw_content, fetch_result)
         metadata["full_text"] = full_text
-
-        # Drop raw HTML unless explicitly kept.
-        if not text_cfg.store_raw_html:
-            metadata["full_text_html"] = None
 
         units: list[dict] = []
 

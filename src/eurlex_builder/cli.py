@@ -140,10 +140,16 @@ def _run(
     retry_failed: bool = False,
     limit: int | None = None,
 ) -> None:
+    from eurlex_builder.errors import SelectionError
     from eurlex_builder.pipeline import Pipeline
 
     pipeline = Pipeline.from_config_file(config_path)
-    pipeline.run(resume=resume, retry_failed=retry_failed, limit=limit)
+    try:
+        outcome = pipeline.run(resume=resume, retry_failed=retry_failed, limit=limit)
+    except SelectionError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
+    if outcome.failed:
+        raise SystemExit(1)
 
 
 def _translate(

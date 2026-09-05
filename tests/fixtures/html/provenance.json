@@ -1,0 +1,42 @@
+[
+  {
+    "fixture": "consolidated-copyright-article-6.xhtml",
+    "celex_id": "02001L0029-20190606",
+    "url": "https://publications.europa.eu/resource/celex/02001L0029-20190606",
+    "language": "eng",
+    "downloaded": "2026-09-05",
+    "element_id": "art_6",
+    "source_sha256": "9ffd1c0af14625d126930e909a83ae2b37be031ec0645bbff711eabe6d735d3d",
+    "fixture_sha256": "dbe6f343a84ab92b5055119b5a30650384685012cc12c45d458f77ff0f06ec07"
+  },
+  {
+    "fixture": "consolidated-gdpr-article-99.xhtml",
+    "celex_id": "02016R0679-20160504",
+    "url": "https://publications.europa.eu/resource/celex/02016R0679-20160504",
+    "language": "eng",
+    "downloaded": "2026-09-05",
+    "element_id": "art_99",
+    "source_sha256": "a681ff22f32f125749af6e96947224369efc132edb8a95b12637e357df1056de",
+    "fixture_sha256": "b3779d8429902541e3cb09dfb063fd690b1b0b909fda047cb823f79147904671"
+  },
+  {
+    "fixture": "consolidated-safety-article-8.xhtml",
+    "celex_id": "01989L0391-20081211",
+    "url": "https://publications.europa.eu/resource/celex/01989L0391-20081211",
+    "language": "eng",
+    "downloaded": "2026-09-05",
+    "element_id": "art_8",
+    "source_sha256": "30ecd90ca41e7ee94fba07c6f33be5967054c5ea1dd5f751d849a0752ee9156d",
+    "fixture_sha256": "846997510deb6799d2decba25a0d42d1759a35d5b29301d99dde65f24f60ef73"
+  },
+  {
+    "fixture": "copyright-directive-article-24.xhtml",
+    "celex_id": "32019L0790",
+    "url": "https://publications.europa.eu/resource/celex/32019L0790",
+    "language": "eng",
+    "downloaded": "2026-09-05",
+    "element_id": "art_24",
+    "source_sha256": "fb2e98e5b0028eda05de854dfc82f4c0eccbad7d02a82f82885091121fedf860",
+    "fixture_sha256": "8f1f87fae8a4f8a60fda98fae4870c1650c11efa56546835be88cf7a5a4d8894"
+  }
+]

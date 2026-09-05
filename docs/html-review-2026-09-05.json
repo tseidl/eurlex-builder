@@ -1,0 +1,2271 @@
+{
+  "review_date": "2026-09-05",
+  "reference_package_version": "0.1.1",
+  "reference_revision": "e9ee4dbb5531e64e00bf21a5412dfbb6e6d4ed1e",
+  "python_version": "3.14.2",
+  "dependency_versions": {
+    "lxml": "6.1.1",
+    "pytest": "9.1.1",
+    "ruff": "0.16.0",
+    "mypy": "2.2.0",
+    "rdflib": "7.6.0",
+    "duckdb": "1.5.4",
+    "polars": "1.42.0"
+  },
+  "scope": "HTML regression comparison against the unmodified review snapshot; paper data were not read or rebuilt.",
+  "case_definitions": {
+    "legislative": "article/paragraph/point x include_recitals/include_articles/include_annexes each false/true; plus full_text",
+    "com": "extract_com plus full_text",
+    "full_text": "extract_html_full_text only"
+  },
+  "parser_only_comparison": {
+    "cases": 2100,
+    "errors": 0,
+    "equal": 2100
+  },
+  "final_comparison": {
+    "cases": 2100,
+    "errors": 0,
+    "different": 75,
+    "equal": 2025
+  },
+  "change_categories": {
+    "full_text": 27,
+    "body": 12,
+    "structured": 36
+  },
+  "conservation_check": "Every whitespace-delimited old token is an ordered subsequence of the corresponding new output. All changed cases passed. This does not certify completeness or all structural boundaries.",
+  "model_consultations": {
+    "model": "claude-fable-5-1",
+    "harness": "Claude Code subscription",
+    "count": 2,
+    "scope": "Short advisory reviews without tools, before adoption; supported the bounded fixes and parser comparison gate."
+  },
+  "sources": [
+    {
+      "source": "test-9076819e3197efbbb871937b66a2f8ae8489726461af9b1586c8d6ec605c34eb.html",
+      "kind": "legislative",
+      "sha256": "9076819e3197efbbb871937b66a2f8ae8489726461af9b1586c8d6ec605c34eb",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "consolidated_norm"
+      ],
+      "case_count": 25,
+      "bytes": 1482,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-32ad97971906308fb7bd2fabc83d9166b4c5b78d21a969fe5c2d556b3b7f760d.html",
+      "kind": "com",
+      "sha256": "32ad97971906308fb7bd2fabc83d9166b4c5b78d21a969fe5c2d556b3b7f760d",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 2,
+      "bytes": 373,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-86e3999db2626967be30b2a63879ccb7fe15eb98c3e5b32e542422d9509a26c6.html",
+      "kind": "legislative",
+      "sha256": "86e3999db2626967be30b2a63879ccb7fe15eb98c3e5b32e542422d9509a26c6",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 279,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-e6d77f9c76ed668da1f6fbd7a30cce5b17f81d979f0ef696cb5c1031bc98047b.html",
+      "kind": "legislative",
+      "sha256": "e6d77f9c76ed668da1f6fbd7a30cce5b17f81d979f0ef696cb5c1031bc98047b",
+      "parser": "xml",
+      "structures": [
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 231,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-657ef6b698c84e9761ed6307de34682ab3534610942423fcac21b4873b9c5fc3.html",
+      "kind": "legislative",
+      "sha256": "657ef6b698c84e9761ed6307de34682ab3534610942423fcac21b4873b9c5fc3",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 329,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-6243441d5539e701b475dc77964f6aa617ca19f807b195b0533671c8236d6d8b.html",
+      "kind": "legislative",
+      "sha256": "6243441d5539e701b475dc77964f6aa617ca19f807b195b0533671c8236d6d8b",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 176,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-a9cd2bc58333bd748a24a3b9c3f60b172331309896cacfeac808c7dadfd803db.html",
+      "kind": "legislative",
+      "sha256": "a9cd2bc58333bd748a24a3b9c3f60b172331309896cacfeac808c7dadfd803db",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 365,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-57a4e9b61343d86b3916842d36fc788e39dd4264e762816bc90639079b41aa96.html",
+      "kind": "legislative",
+      "sha256": "57a4e9b61343d86b3916842d36fc788e39dd4264e762816bc90639079b41aa96",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 269,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-d82d62af7547fe8c5d244c24801873ee0cf89648d72d940d6d7ab8a80c306bbb.html",
+      "kind": "legislative",
+      "sha256": "d82d62af7547fe8c5d244c24801873ee0cf89648d72d940d6d7ab8a80c306bbb",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 563,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-0432383ca59f97c57df2e7ae24621cb8b43304f4c7aa34ea9ab811e0f0cb1767.html",
+      "kind": "legislative",
+      "sha256": "0432383ca59f97c57df2e7ae24621cb8b43304f4c7aa34ea9ab811e0f0cb1767",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 243,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-6918789eb34202396510b7fb15dfa8b9752c2fb5685265250a3ace673896063e.html",
+      "kind": "legislative",
+      "sha256": "6918789eb34202396510b7fb15dfa8b9752c2fb5685265250a3ace673896063e",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 345,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-0cf9e0c5e3239a273adbd978e8ac78bd1b6c440bb91c9123a89d11c4231369a8.html",
+      "kind": "legislative",
+      "sha256": "0cf9e0c5e3239a273adbd978e8ac78bd1b6c440bb91c9123a89d11c4231369a8",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 374,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-1760c27270d2dc62df861464136102afaae1a84a3d01cdd7a84c7de897312b37.html",
+      "kind": "legislative",
+      "sha256": "1760c27270d2dc62df861464136102afaae1a84a3d01cdd7a84c7de897312b37",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 323,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-9a08b4830c0f7d82712188405f9c51cdae6efeecf8ccc91a09c05903dd72489d.html",
+      "kind": "legislative",
+      "sha256": "9a08b4830c0f7d82712188405f9c51cdae6efeecf8ccc91a09c05903dd72489d",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 401,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-7694080a7c382b6126ea4d90d63addae8a95fd4a8a73aa114d194cd7332372d9.html",
+      "kind": "legislative",
+      "sha256": "7694080a7c382b6126ea4d90d63addae8a95fd4a8a73aa114d194cd7332372d9",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 289,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-32cd8251aaf60f58ad41e1e71621a2f7c1d7500736a4e3a083dcea613200afe8.html",
+      "kind": "legislative",
+      "sha256": "32cd8251aaf60f58ad41e1e71621a2f7c1d7500736a4e3a083dcea613200afe8",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 355,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-e33b1666d706814fb327457de2cc31e7819f7817f1c66ef425438a4280e4aed3.html",
+      "kind": "legislative",
+      "sha256": "e33b1666d706814fb327457de2cc31e7819f7817f1c66ef425438a4280e4aed3",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 454,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-0122e59846c22f1628c4cea111efacc785f8ed4431219c75430ae720f4f2b892.html",
+      "kind": "legislative",
+      "sha256": "0122e59846c22f1628c4cea111efacc785f8ed4431219c75430ae720f4f2b892",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 252,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-73a46d5728a23c1966666559e2fa936f66a25e2b5a33d86f7355157c241f231e.html",
+      "kind": "legislative",
+      "sha256": "73a46d5728a23c1966666559e2fa936f66a25e2b5a33d86f7355157c241f231e",
+      "parser": "xml",
+      "structures": [
+        "standard"
+      ],
+      "case_count": 25,
+      "bytes": 273,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-9b0dba7d448dad5752184cd26ce81321f7e122187eab5ea460e1aaf65deed9f1.html",
+      "kind": "legislative",
+      "sha256": "9b0dba7d448dad5752184cd26ce81321f7e122187eab5ea460e1aaf65deed9f1",
+      "parser": "xml",
+      "structures": [
+        "standard"
+      ],
+      "case_count": 25,
+      "bytes": 364,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "kind": "legislative",
+      "sha256": "bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 250,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-3a0f39eecd56f54f0a955874703115a7bbfaf07a24d8a8ab49592090c60d44db.html",
+      "kind": "legislative",
+      "sha256": "3a0f39eecd56f54f0a955874703115a7bbfaf07a24d8a8ab49592090c60d44db",
+      "parser": "xml",
+      "structures": [
+        "standard"
+      ],
+      "case_count": 25,
+      "bytes": 489,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-b657bc6db0c6f50fd391168b0c96f5a50f2c4555f0845bda6b666a81bbc9bb2f.html",
+      "kind": "legislative",
+      "sha256": "b657bc6db0c6f50fd391168b0c96f5a50f2c4555f0845bda6b666a81bbc9bb2f",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 278,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-d6db2928aed03af7ca1b15138fb785b5095d0673dc9ce11fbfb7848d2e5d4f7d.html",
+      "kind": "full_text",
+      "sha256": "d6db2928aed03af7ca1b15138fb785b5095d0673dc9ce11fbfb7848d2e5d4f7d",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 1,
+      "bytes": 160,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-9049fa2ba875ba324b9b4938e56672254c7aac3f9d38fbf00e185f2bc8f55282.html",
+      "kind": "legislative",
+      "sha256": "9049fa2ba875ba324b9b4938e56672254c7aac3f9d38fbf00e185f2bc8f55282",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 410,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "kind": "legislative",
+      "sha256": "4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 288,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-b613e957929dcc0a0990cbd5372f123be40ab68250bab72527e8e151902635eb.html",
+      "kind": "legislative",
+      "sha256": "b613e957929dcc0a0990cbd5372f123be40ab68250bab72527e8e151902635eb",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 261,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-028e0036b4575fefeb846b906259f97033681f2c94ff42129bbb62a607f9ae2e.html",
+      "kind": "legislative",
+      "sha256": "028e0036b4575fefeb846b906259f97033681f2c94ff42129bbb62a607f9ae2e",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 268,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-75df18e65d5d43487c5d81911064e65e52f35896b75af28d63deaefd589a204d.html",
+      "kind": "legislative",
+      "sha256": "75df18e65d5d43487c5d81911064e65e52f35896b75af28d63deaefd589a204d",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 320,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-612ac260d028fe7441c499aff9164849856b31c7ff95195286de71d065ecc232.html",
+      "kind": "legislative",
+      "sha256": "612ac260d028fe7441c499aff9164849856b31c7ff95195286de71d065ecc232",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 290,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-925dcafa7a7880eab89e1b5195efbecce2839b012d2b4adb9374ed5d283aed78.html",
+      "kind": "legislative",
+      "sha256": "925dcafa7a7880eab89e1b5195efbecce2839b012d2b4adb9374ed5d283aed78",
+      "parser": "xml",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 239,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-4c4df04339b73b0b135c1997196ab1bd072e1550c9942c2b3e0b4b416ac5b01d.html",
+      "kind": "legislative",
+      "sha256": "4c4df04339b73b0b135c1997196ab1bd072e1550c9942c2b3e0b4b416ac5b01d",
+      "parser": "xml",
+      "structures": [
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 155,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-bf05b9135fcf301b890695ecdd25750c8917d4c7d524e99a5df8cc2890a35516.html",
+      "kind": "legislative",
+      "sha256": "bf05b9135fcf301b890695ecdd25750c8917d4c7d524e99a5df8cc2890a35516",
+      "parser": "xml",
+      "structures": [
+        "manual"
+      ],
+      "case_count": 25,
+      "bytes": 279,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-7f92fdb936e0f1c439f246b40ea76dac552bc3971a2dd646588745e981d3eefa.html",
+      "kind": "legislative",
+      "sha256": "7f92fdb936e0f1c439f246b40ea76dac552bc3971a2dd646588745e981d3eefa",
+      "parser": "xml",
+      "structures": [
+        "manual"
+      ],
+      "case_count": 25,
+      "bytes": 305,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-dea5d32aef8133419aa0b0cb071b5fa6cd34d324d6b3732efb50f69c565ef687.html",
+      "kind": "legislative",
+      "sha256": "dea5d32aef8133419aa0b0cb071b5fa6cd34d324d6b3732efb50f69c565ef687",
+      "parser": "xml",
+      "structures": [
+        "consolidated_norm"
+      ],
+      "case_count": 25,
+      "bytes": 261,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-d379d1511046caab43edda2f79a43132bdd4ab5523069ca76f4df048bb6fc7e9.html",
+      "kind": "legislative",
+      "sha256": "d379d1511046caab43edda2f79a43132bdd4ab5523069ca76f4df048bb6fc7e9",
+      "parser": "xml",
+      "structures": [
+        "consolidated_norm"
+      ],
+      "case_count": 25,
+      "bytes": 300,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-f07a53c65ae040bff95034a3f3c8c8d56ba204af7c17958e41d30eb20bdb004a.html",
+      "kind": "legislative",
+      "sha256": "f07a53c65ae040bff95034a3f3c8c8d56ba204af7c17958e41d30eb20bdb004a",
+      "parser": "xml",
+      "structures": [
+        "standard"
+      ],
+      "case_count": 25,
+      "bytes": 72,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-10ab36098fa9f5d6af6de2e5867ee3ae2234b9100f64a349c51310becd8e1f57.html",
+      "kind": "legislative",
+      "sha256": "10ab36098fa9f5d6af6de2e5867ee3ae2234b9100f64a349c51310becd8e1f57",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 152,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-406909ba04854abca7e903f4453dcf7dff83ed56cc23143a756de0b4ae1afc7e.html",
+      "kind": "legislative",
+      "sha256": "406909ba04854abca7e903f4453dcf7dff83ed56cc23143a756de0b4ae1afc7e",
+      "parser": "xml",
+      "structures": [
+        "standard"
+      ],
+      "case_count": 25,
+      "bytes": 155,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-4cd61afd0ed599a866822426a63e1fda92a331115a9d2c42ff75cd9bd8f8af92.html",
+      "kind": "full_text",
+      "sha256": "4cd61afd0ed599a866822426a63e1fda92a331115a9d2c42ff75cd9bd8f8af92",
+      "parser": "xml",
+      "structures": [
+        "standard"
+      ],
+      "case_count": 1,
+      "bytes": 70,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-4cd61afd0ed599a866822426a63e1fda92a331115a9d2c42ff75cd9bd8f8af92.html",
+      "kind": "legislative",
+      "sha256": "4cd61afd0ed599a866822426a63e1fda92a331115a9d2c42ff75cd9bd8f8af92",
+      "parser": "xml",
+      "structures": [
+        "standard"
+      ],
+      "case_count": 25,
+      "bytes": 70,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "test-ae9346b45ce6b35055d8d61a4979615f39fee8e23d37d60b3f77e06f8420ebd8.html",
+      "kind": "full_text",
+      "sha256": "ae9346b45ce6b35055d8d61a4979615f39fee8e23d37d60b3f77e06f8420ebd8",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 1,
+      "bytes": 38,
+      "origin": "existing_test_fixture"
+    },
+    {
+      "source": "32000D0520.html",
+      "kind": "legislative",
+      "sha256": "a148ad3de4163c401ef3d383bf570c989b6e82528d112fc6b94f6c1822b9538a",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 173943,
+      "origin": "cellar",
+      "celex_id": "32000D0520",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32000D0520"
+    },
+    {
+      "source": "32016R0679.html",
+      "kind": "legislative",
+      "sha256": "962539af03738bf552319ff4ce42d69e5f95a576307c4dfed7bf87e81b646b9d",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 806864,
+      "origin": "cellar",
+      "celex_id": "32016R0679",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32016R0679"
+    },
+    {
+      "source": "32018L1972.html",
+      "kind": "legislative",
+      "sha256": "87e2dae5b83700e6f40ff105b8ee5d5395cc778ad92d4a046a44cbde3d011eb3",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 1556085,
+      "origin": "cellar",
+      "celex_id": "32018L1972",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32018L1972"
+    },
+    {
+      "source": "32018R1725.html",
+      "kind": "legislative",
+      "sha256": "b5549d255f867febc0eb44419436fe67f140101ad48ca1c143ace15eda6dad83",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 585020,
+      "origin": "cellar",
+      "celex_id": "32018R1725",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32018R1725"
+    },
+    {
+      "source": "32019L0790.html",
+      "kind": "legislative",
+      "sha256": "fb2e98e5b0028eda05de854dfc82f4c0eccbad7d02a82f82885091121fedf860",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 273811,
+      "origin": "cellar",
+      "celex_id": "32019L0790",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32019L0790"
+    },
+    {
+      "source": "32022D2481.html",
+      "kind": "legislative",
+      "sha256": "5d3ba32f69c2231052b199079f7ec1fa9c44e2d35911e64bfde28023f3ee3a47",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 204034,
+      "origin": "cellar",
+      "celex_id": "32022D2481",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32022D2481"
+    },
+    {
+      "source": "32022L2555.html",
+      "kind": "legislative",
+      "sha256": "6ee66d5c419d9a056fb98d94083cacf9b818803bd6b416435718e0d4919cb589",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 702913,
+      "origin": "cellar",
+      "celex_id": "32022L2555",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32022L2555"
+    },
+    {
+      "source": "32022R2065.html",
+      "kind": "legislative",
+      "sha256": "11b119a7d45f3a10cd41714061f9d907839ef5d1634e41774490f00b95856bbf",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 838166,
+      "origin": "cellar",
+      "celex_id": "32022R2065",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32022R2065"
+    },
+    {
+      "source": "32023R2854.html",
+      "kind": "legislative",
+      "sha256": "1085b7fa3011970b65b1e4d56205202dceb37f72cd22336aa0c78af35ceaea66",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 590794,
+      "origin": "cellar",
+      "celex_id": "32023R2854",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32023R2854"
+    },
+    {
+      "source": "32024R1689.html",
+      "kind": "legislative",
+      "sha256": "8f0b656302f9864cc87e040c371f209a9d65ae1a6cecc25ca5eb737e872d721a",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 1262391,
+      "origin": "cellar",
+      "celex_id": "32024R1689",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32024R1689"
+    },
+    {
+      "source": "52005DC0229.html",
+      "kind": "com",
+      "sha256": "01221a0f6087a3d0e45f7c352c84a8257e030bae24de93d1c56ab3f49678a21b",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 2,
+      "bytes": 30776,
+      "origin": "cellar",
+      "celex_id": "52005DC0229",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/52005DC0229"
+    },
+    {
+      "source": "52020DC0067.html",
+      "kind": "com",
+      "sha256": "f4609095c4562e8909867674f9a3bf55a0f04a913ef3b8de379c38d1e3e9e34d",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 2,
+      "bytes": 60848,
+      "origin": "cellar",
+      "celex_id": "52020DC0067",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/52020DC0067"
+    },
+    {
+      "source": "52021DC0118-annex.html",
+      "kind": "com",
+      "sha256": "6bd865b3c550f0d2d28e839595e981897bfa3237583fbd8ed44ff32ea046174c",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 2,
+      "bytes": 32947,
+      "origin": "cellar",
+      "celex_id": "52021DC0118",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/cellar/12e835e2-81af-11eb-9ac9-01aa75ed71a1.0001.03/DOC_2"
+    },
+    {
+      "source": "52021DC0118-main.html",
+      "kind": "com",
+      "sha256": "eb631f141dfb378ed9db42e1d4781529e04356ef1be439f36361f3c8bedfd0f2",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 2,
+      "bytes": 202758,
+      "origin": "cellar",
+      "celex_id": "52021DC0118",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/cellar/12e835e2-81af-11eb-9ac9-01aa75ed71a1.0001.03/DOC_1"
+    },
+    {
+      "source": "31964L0221-eng.html",
+      "kind": "legislative",
+      "sha256": "614560c5e07d15c126d754accd801632337adb1704665fca6d61278c4d6a261f",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 12415,
+      "origin": "cellar",
+      "celex_id": "31964L0221",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31964L0221"
+    },
+    {
+      "source": "31962R0017-eng.html",
+      "kind": "legislative",
+      "sha256": "6f3c2f3a58ec4781a955b96691783b15c83a125240295eaeebbb6c0973ad02c2",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 31562,
+      "origin": "cellar",
+      "celex_id": "31962R0017",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31962R0017"
+    },
+    {
+      "source": "31968R1612-eng.html",
+      "kind": "legislative",
+      "sha256": "b7be0346f3ddaf7ee72fcaf75304a3f694bdc8ecf152b314840d5e76a3702e56",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 42713,
+      "origin": "cellar",
+      "celex_id": "31968R1612",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31968R1612"
+    },
+    {
+      "source": "31970L0220-eng.html",
+      "kind": "legislative",
+      "sha256": "e1d1f41301df467537e81b3fdfa5cdd2fd254033225d03835f7be4b5e334c0ed",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 47498,
+      "origin": "cellar",
+      "celex_id": "31970L0220",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31970L0220"
+    },
+    {
+      "source": "31973L0023-eng.html",
+      "kind": "legislative",
+      "sha256": "49a78a65fcf14c15bbff7a4148136de4a4be9fbbe3527de7bd0f5c4596c6c2d4",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 18952,
+      "origin": "cellar",
+      "celex_id": "31973L0023",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31973L0023"
+    },
+    {
+      "source": "31977L0388-eng.html",
+      "kind": "legislative",
+      "sha256": "256f40bff798dbec02f3fcae42145fa16b244da830a7e4f14492f5df754bc140",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 109355,
+      "origin": "cellar",
+      "celex_id": "31977L0388",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31977L0388"
+    },
+    {
+      "source": "31972R0574-eng.html",
+      "kind": "legislative",
+      "sha256": "202196d319ec8fdf7f257ca16cb5061eb3dd2e64ada26835f18c85038f170be5",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 288483,
+      "origin": "cellar",
+      "celex_id": "31972R0574",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31972R0574"
+    },
+    {
+      "source": "31983D0142-eng.html",
+      "kind": "legislative",
+      "sha256": "74b5789c2894951efb1e93ebdc689a95286bf1e515c5545d81a020263e717bfe",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 7317,
+      "origin": "cellar",
+      "celex_id": "31983D0142",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31983D0142"
+    },
+    {
+      "source": "31982D0379-eng.html",
+      "kind": "legislative",
+      "sha256": "d06357eb2d3f33a1ff5680a01079c3accb3a9aaa14fc6f0caa416eeda003c91b",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 13587,
+      "origin": "cellar",
+      "celex_id": "31982D0379",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31982D0379"
+    },
+    {
+      "source": "31982R1680-eng.html",
+      "kind": "legislative",
+      "sha256": "8ffb235a33ac0ae2256b0a3ddf621a827aa1706e8108836dc0ccbd8d78d0eddb",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 5152,
+      "origin": "cellar",
+      "celex_id": "31982R1680",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31982R1680"
+    },
+    {
+      "source": "31988R3127-eng.html",
+      "kind": "legislative",
+      "sha256": "ddd6d7cc13f935e885bcbfc2f8761378162073692dd530b66ad502ed7c44d8b3",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 4670,
+      "origin": "cellar",
+      "celex_id": "31988R3127",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31988R3127"
+    },
+    {
+      "source": "31989L0391-eng.html",
+      "kind": "legislative",
+      "sha256": "0f75ed43874cf9a8cbe60aaca220cd11d5f1521733b847afef72abd6853e531e",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 34013,
+      "origin": "cellar",
+      "celex_id": "31989L0391",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31989L0391"
+    },
+    {
+      "source": "31991R2092-eng.html",
+      "kind": "legislative",
+      "sha256": "3a994c580fbd840c65f176ca58c03d30dcc3db1616b654c68acc9511c0bc6f9a",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 48041,
+      "origin": "cellar",
+      "celex_id": "31991R2092",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31991R2092"
+    },
+    {
+      "source": "31990L0385-eng.html",
+      "kind": "legislative",
+      "sha256": "21cbc77381b33cbb182afbc42b13e1709d137cb87c6fe995dacddec2e0a92080",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 67534,
+      "origin": "cellar",
+      "celex_id": "31990L0385",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31990L0385"
+    },
+    {
+      "source": "31993L0013-eng.html",
+      "kind": "legislative",
+      "sha256": "f66d765e1e463a7cf534b99d2e3b2854c9fc1f8d55957c9b4a302452723d450b",
+      "parser": "xml",
+      "structures": [
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 37247,
+      "origin": "cellar",
+      "celex_id": "31993L0013",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31993L0013"
+    },
+    {
+      "source": "31995L0046-eng.html",
+      "kind": "legislative",
+      "sha256": "a86b2053b2f354b26afa4a6fbcaaab1b879f70cfb2be033a231814feebec2a98",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 84500,
+      "origin": "cellar",
+      "celex_id": "31995L0046",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31995L0046"
+    },
+    {
+      "source": "32001L0029-eng.html",
+      "kind": "legislative",
+      "sha256": "85c55363746983aabd578e5df8e1e7b4f042effa7f67842a344d74b9b88c3383",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 57281,
+      "origin": "cellar",
+      "celex_id": "32001L0029",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32001L0029"
+    },
+    {
+      "source": "31998L0034-eng.html",
+      "kind": "legislative",
+      "sha256": "e5a24994143ba0feff0031f3a5531a41cf1961a63e4406d5630aaa7dfa4eddef",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 38209,
+      "origin": "cellar",
+      "celex_id": "31998L0034",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/31998L0034"
+    },
+    {
+      "source": "32000L0031-eng.html",
+      "kind": "legislative",
+      "sha256": "ace6f4c0e50a12845be213ad6094ce38f06a5dd2784fdf07b91b7d2e19f0eaaf",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 72485,
+      "origin": "cellar",
+      "celex_id": "32000L0031",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32000L0031"
+    },
+    {
+      "source": "32002L0058-eng.html",
+      "kind": "legislative",
+      "sha256": "1b41bc43b88d8e8c2e9ea759e5ba0bad00cad268a5d6ffd1d4cee6fcc262cba8",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 59451,
+      "origin": "cellar",
+      "celex_id": "32002L0058",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32002L0058"
+    },
+    {
+      "source": "32004L0038-eng.html",
+      "kind": "legislative",
+      "sha256": "e1b6127d5aaea54da25981c79c253a0123ae01c7f5ee9a7211e22b1ed0e4aca4",
+      "parser": "xml",
+      "structures": [
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 106060,
+      "origin": "cellar",
+      "celex_id": "32004L0038",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32004L0038"
+    },
+    {
+      "source": "32008R0765-eng.html",
+      "kind": "legislative",
+      "sha256": "837732e0248a0e8777fe826b3ce5c1a97073dad7bf66c71eb675e940c0368aea",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 374578,
+      "origin": "cellar",
+      "celex_id": "32008R0765",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32008R0765"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "kind": "legislative",
+      "sha256": "9ffd1c0af14625d126930e909a83ae2b37be031ec0645bbff711eabe6d735d3d",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "consolidated_norm"
+      ],
+      "case_count": 25,
+      "bytes": 63409,
+      "origin": "cellar",
+      "celex_id": "02001L0029-20190606",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/02001L0029-20190606"
+    },
+    {
+      "source": "32010L0013-eng.html",
+      "kind": "legislative",
+      "sha256": "8bd1b89db58ba50f5f3d80887ab32728b69f644943985a5f1edcc0100d158562",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 285693,
+      "origin": "cellar",
+      "celex_id": "32010L0013",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/32010L0013"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "kind": "legislative",
+      "sha256": "a681ff22f32f125749af6e96947224369efc132edb8a95b12637e357df1056de",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "consolidated_norm"
+      ],
+      "case_count": 25,
+      "bytes": 462324,
+      "origin": "cellar",
+      "celex_id": "02016R0679-20160504",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/02016R0679-20160504"
+    },
+    {
+      "source": "01995L0046-20031120-eng.html",
+      "kind": "legislative",
+      "sha256": "56ff7fd2fae4daed392c49e1c056cc37fa0037bcc4c6197a8fab7955c32b3a1a",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 25,
+      "bytes": 167910,
+      "origin": "cellar",
+      "celex_id": "01995L0046-20031120",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/01995L0046-20031120"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "kind": "legislative",
+      "sha256": "30ecd90ca41e7ee94fba07c6f33be5967054c5ea1dd5f751d849a0752ee9156d",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "consolidated_norm"
+      ],
+      "case_count": 25,
+      "bytes": 77819,
+      "origin": "cellar",
+      "celex_id": "01989L0391-20081211",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/01989L0391-20081211"
+    },
+    {
+      "source": "51998PC0586-eng.html",
+      "kind": "com",
+      "sha256": "822464a00d0d570233f76bdea9aedc096142093e0cbd349b24fa7719a86bbc5e",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 2,
+      "bytes": 49349,
+      "origin": "cellar",
+      "celex_id": "51998PC0586",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/51998PC0586"
+    },
+    {
+      "source": "52012SC0072-eng.html",
+      "kind": "com",
+      "sha256": "c2661297cc5e4da085e41336603e56f30d186ea76959c1e19d30646556a50635",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 2,
+      "bytes": 717200,
+      "origin": "cellar",
+      "celex_id": "52012SC0072",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/52012SC0072"
+    },
+    {
+      "source": "52016SC0110-eng.html",
+      "kind": "com",
+      "sha256": "96545e152ffad9fde75e9d806c903d2fd9f4d8619aaab17a1b8d0767766dbf57",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 2,
+      "bytes": 208380,
+      "origin": "cellar",
+      "celex_id": "52016SC0110",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/52016SC0110"
+    },
+    {
+      "source": "52020PC0825-eng.html",
+      "kind": "com",
+      "sha256": "0571acbd382b4ef12511ecbc5283a2c7d4d73716b1b2b5a388c055b2c0bf7043",
+      "parser": "xml",
+      "structures": [
+        "manual"
+      ],
+      "case_count": 2,
+      "bytes": 684589,
+      "origin": "cellar",
+      "celex_id": "52020PC0825",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/celex/52020PC0825"
+    },
+    {
+      "source": "52021PC0206-eng.html",
+      "kind": "com",
+      "sha256": "e0e76ebf23c9d5fe28e2445e4269fbe0d9a2d0dfe905633699036d5dfd9a5f8b",
+      "parser": "xml",
+      "structures": [
+        "manual"
+      ],
+      "case_count": 2,
+      "bytes": 589284,
+      "origin": "cellar",
+      "celex_id": "52021PC0206",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/cellar/e0649735-a372-11eb-9585-01aa75ed71a1.0001.03/DOC_1"
+    },
+    {
+      "source": "32016R0679-fra.html",
+      "kind": "legislative",
+      "sha256": "27a2248cf0cf7c79a3ec7eae30b6e871817230d9f577632fed915181642144c2",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 876858,
+      "origin": "cellar",
+      "celex_id": "32016R0679",
+      "language": "fra",
+      "url": "https://publications.europa.eu/resource/celex/32016R0679"
+    },
+    {
+      "source": "52020SC0348-eng.html",
+      "kind": "com",
+      "sha256": "759771aed9f4b8a90ffafb741221be32d483bf790fdba52c8f0a4f012eddac41",
+      "parser": "xml",
+      "structures": [
+        "classless"
+      ],
+      "case_count": 2,
+      "bytes": 485048,
+      "origin": "cellar",
+      "celex_id": "52020SC0348",
+      "language": "eng",
+      "url": "https://publications.europa.eu/resource/cellar/5ebd61c9-3f82-11eb-b27b-01aa75ed71a1.0001.03/DOC_1"
+    },
+    {
+      "source": "32016R0679-deu.html",
+      "kind": "legislative",
+      "sha256": "219040a03cea829785c9f9752dcab9bfcee7b3c012092f5da8567640a816116d",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 862613,
+      "origin": "cellar",
+      "celex_id": "32016R0679",
+      "language": "deu",
+      "url": "https://publications.europa.eu/resource/celex/32016R0679"
+    },
+    {
+      "source": "32016R0679-ita.html",
+      "kind": "legislative",
+      "sha256": "52dbf00e8092bbff225158d1ce09ed3e4a6d2712f2bb9d5c6bfdf1d1b61b9f0a",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 823981,
+      "origin": "cellar",
+      "celex_id": "32016R0679",
+      "language": "ita",
+      "url": "https://publications.europa.eu/resource/celex/32016R0679"
+    },
+    {
+      "source": "32016R0679-nld.html",
+      "kind": "legislative",
+      "sha256": "47da4f0697695d87067c6a2ed58659768adce12b0657da9efc51c3a8a305f37d",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 836229,
+      "origin": "cellar",
+      "celex_id": "32016R0679",
+      "language": "nld",
+      "url": "https://publications.europa.eu/resource/celex/32016R0679"
+    },
+    {
+      "source": "32000L0031-fra.html",
+      "kind": "legislative",
+      "sha256": "e6c20e4d3938115f4fbe790682cf3be125f6bdc67b216461b8f85a9090e75472",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 85958,
+      "origin": "cellar",
+      "celex_id": "32000L0031",
+      "language": "fra",
+      "url": "https://publications.europa.eu/resource/celex/32000L0031"
+    },
+    {
+      "source": "32016R0679-spa.html",
+      "kind": "legislative",
+      "sha256": "7e6f4309e448e2532be3fd9464f3de7929a0e25b5c4c53239b320669b9bce33b",
+      "parser": "xml",
+      "structures": [
+        "standard",
+        "class_based"
+      ],
+      "case_count": 25,
+      "bytes": 831331,
+      "origin": "cellar",
+      "celex_id": "32016R0679",
+      "language": "spa",
+      "url": "https://publications.europa.eu/resource/celex/32016R0679"
+    },
+    {
+      "source": "32000L0031-deu.html",
+      "kind": "legislative",
+      "sha256": "69256129430b32a55608b14c057f95953e85fbeb125cab11e431bbdd04fa01e6",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 81465,
+      "origin": "cellar",
+      "celex_id": "32000L0031",
+      "language": "deu",
+      "url": "https://publications.europa.eu/resource/celex/32000L0031"
+    },
+    {
+      "source": "31964L0221-fra.html",
+      "kind": "legislative",
+      "sha256": "17b66b33f723b7db7dfe90e348e96a45e322609e8e30a458f917254650ebc9b6",
+      "parser": "html",
+      "structures": [
+        "text_only"
+      ],
+      "case_count": 25,
+      "bytes": 46059,
+      "origin": "cellar",
+      "celex_id": "31964L0221",
+      "language": "fra",
+      "url": "https://publications.europa.eu/resource/celex/31964L0221"
+    }
+  ],
+  "failed_downloads": [
+    {
+      "celex_id": "31969D0508",
+      "language": "eng",
+      "http_status": "404"
+    },
+    {
+      "celex_id": "31979D0869",
+      "language": "eng",
+      "http_status": "404"
+    },
+    {
+      "celex_id": "32006R1907",
+      "language": "eng",
+      "http_status": "404"
+    }
+  ],
+  "changed_outputs": [
+    {
+      "source": "test-9076819e3197efbbb871937b66a2f8ae8489726461af9b1586c8d6ec605c34eb.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 9,
+      "category": "full_text"
+    },
+    {
+      "source": "test-32cd8251aaf60f58ad41e1e71621a2f7c1d7500736a4e3a083dcea613200afe8.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 6,
+      "category": "full_text"
+    },
+    {
+      "source": "test-e33b1666d706814fb327457de2cc31e7819f7817f1c66ef425438a4280e4aed3.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 15,
+      "category": "full_text"
+    },
+    {
+      "source": "test-0122e59846c22f1628c4cea111efacc785f8ed4431219c75430ae720f4f2b892.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "full_text"
+    },
+    {
+      "source": "test-73a46d5728a23c1966666559e2fa936f66a25e2b5a33d86f7355157c241f231e.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 13,
+      "category": "full_text"
+    },
+    {
+      "source": "test-9b0dba7d448dad5752184cd26ce81321f7e122187eab5ea460e1aaf65deed9f1.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 17,
+      "category": "full_text"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "full_text"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "case": "article-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "case": "article-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "case": "paragraph-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "case": "paragraph-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "case": "point-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-bf9817eaf6b0497a2c46e617482d996a518c63b323ce79addb9a97cddf51ce29.html",
+      "case": "point-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-3a0f39eecd56f54f0a955874703115a7bbfaf07a24d8a8ab49592090c60d44db.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 23,
+      "category": "full_text"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "full_text"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "case": "article-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "case": "article-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "case": "paragraph-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "case": "paragraph-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "case": "point-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-4a1539250ac6dd92f2ccfde7ef4984084f087095f11470f4a3cfc03cbaeb9a77.html",
+      "case": "point-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        1,
+        1
+      ],
+      "preserved": true,
+      "added_tokens": 10,
+      "category": "body"
+    },
+    {
+      "source": "test-b613e957929dcc0a0990cbd5372f123be40ab68250bab72527e8e151902635eb.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 3,
+      "category": "full_text"
+    },
+    {
+      "source": "test-406909ba04854abca7e903f4453dcf7dff83ed56cc23143a756de0b4ae1afc7e.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 12,
+      "category": "full_text"
+    },
+    {
+      "source": "test-ae9346b45ce6b35055d8d61a4979615f39fee8e23d37d60b3f77e06f8420ebd8.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 2,
+      "category": "full_text"
+    },
+    {
+      "source": "32018L1972.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 16,
+      "category": "full_text"
+    },
+    {
+      "source": "32019L0790.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 216,
+      "category": "full_text"
+    },
+    {
+      "source": "32024R1689.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 1730,
+      "category": "full_text"
+    },
+    {
+      "source": "52020DC0067.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 17,
+      "category": "full_text"
+    },
+    {
+      "source": "52021DC0118-annex.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 14,
+      "category": "full_text"
+    },
+    {
+      "source": "52021DC0118-main.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 46,
+      "category": "full_text"
+    },
+    {
+      "source": "32008R0765-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 13,
+      "category": "full_text"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 1320,
+      "category": "full_text"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "article-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        15,
+        15
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "article-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        15,
+        15
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "article-(True, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        15,
+        15
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "article-(True, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        15,
+        15
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "paragraph-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        35,
+        35
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "paragraph-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        35,
+        35
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "paragraph-(True, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        35,
+        35
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "paragraph-(True, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        35,
+        35
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "point-(False, True, False)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        92,
+        93
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "point-(False, True, True)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        92,
+        93
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "point-(True, True, False)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        92,
+        93
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "case": "point-(True, True, True)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        92,
+        93
+      ],
+      "preserved": true,
+      "added_tokens": 333,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 15943,
+      "category": "full_text"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "article-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        99,
+        99
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "article-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        99,
+        99
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "article-(True, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        99,
+        99
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "article-(True, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        99,
+        99
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "paragraph-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        389,
+        389
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "paragraph-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        389,
+        389
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "paragraph-(True, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        389,
+        389
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "paragraph-(True, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        389,
+        389
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "point-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        748,
+        748
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "point-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        748,
+        748
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "point-(True, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        748,
+        748
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "case": "point-(True, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        748,
+        748
+      ],
+      "preserved": true,
+      "added_tokens": 384,
+      "category": "structured"
+    },
+    {
+      "source": "01995L0046-20031120-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 1,
+      "category": "full_text"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 2167,
+      "category": "full_text"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "article-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        20,
+        20
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "article-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        21,
+        21
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "article-(True, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        20,
+        20
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "article-(True, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        21,
+        21
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "paragraph-(False, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        65,
+        65
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "paragraph-(False, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        66,
+        66
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "paragraph-(True, True, False)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        65,
+        65
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "paragraph-(True, True, True)",
+      "coordinates_unchanged": true,
+      "unit_counts": [
+        66,
+        66
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "point-(False, True, False)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        123,
+        124
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "point-(False, True, True)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        124,
+        125
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "point-(True, True, False)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        123,
+        124
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "case": "point-(True, True, True)",
+      "coordinates_unchanged": false,
+      "unit_counts": [
+        124,
+        125
+      ],
+      "preserved": true,
+      "added_tokens": 97,
+      "category": "structured"
+    },
+    {
+      "source": "52016SC0110-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 103,
+      "category": "full_text"
+    },
+    {
+      "source": "52020PC0825-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 1651,
+      "category": "full_text"
+    },
+    {
+      "source": "52021PC0206-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 2327,
+      "category": "full_text"
+    },
+    {
+      "source": "52020SC0348-eng.html",
+      "case": "full_text",
+      "preserved": true,
+      "added_tokens": 138,
+      "category": "full_text"
+    }
+  ],
+  "article_text_repairs": [
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "article": "6",
+      "old_text_chars": 2749,
+      "new_text_chars": 3547
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "article": "7",
+      "old_text_chars": 1167,
+      "new_text_chars": 1636
+    },
+    {
+      "source": "02001L0029-20190606-eng.html",
+      "article": "12",
+      "old_text_chars": 1535,
+      "new_text_chars": 2377
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "7",
+      "old_text_chars": 909,
+      "new_text_chars": 1191
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "26",
+      "old_text_chars": 897,
+      "new_text_chars": 1118
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "43",
+      "old_text_chars": 3839,
+      "new_text_chars": 4366
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "45",
+      "old_text_chars": 4748,
+      "new_text_chars": 5013
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "62",
+      "old_text_chars": 2959,
+      "new_text_chars": 3240
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "76",
+      "old_text_chars": 137,
+      "new_text_chars": 338
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "92",
+      "old_text_chars": 999,
+      "new_text_chars": 1421
+    },
+    {
+      "source": "02016R0679-20160504-eng.html",
+      "article": "99",
+      "old_text_chars": 77,
+      "new_text_chars": 180
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "article": "8",
+      "old_text_chars": 1992,
+      "new_text_chars": 2156
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "article": "13",
+      "old_text_chars": 1551,
+      "new_text_chars": 1802
+    },
+    {
+      "source": "01989L0391-20081211-eng.html",
+      "article": "16",
+      "old_text_chars": 467,
+      "new_text_chars": 627
+    }
+  ],
+  "artifacts": {
+    "permanent_excerpts": "tests/fixtures/html",
+    "session_cache": "/tmp/eurlex-builder-review-20260905",
+    "note": "Full downloaded responses, baseline source copy, comparison scripts, and complete outputs remain in the session cache. The permanent excerpts are a subset, not the full corpus."
+  }
+}

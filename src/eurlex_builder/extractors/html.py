@@ -13,15 +13,17 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 
-from lxml import etree, html
+from lxml import etree
 
 from eurlex_builder.extractors.splitter import (
     _find_quoted_regions,
     _is_in_quoted_region,
     split_article,
 )
-from eurlex_builder.utils import normalize_html_encoding_declaration, normalize_string
+from eurlex_builder.html_parser import parse_html
+from eurlex_builder.utils import is_valid_celex, normalize_string
 
 logger = logging.getLogger("eurlex_builder")
 
@@ -125,18 +127,49 @@ def _strip_recital_tail(text: str) -> str:
 
 def extract_html_full_text(raw_content: bytes) -> str | None:
     """Extract all visible text from HTML content. Used for full_text column."""
-    raw_content = normalize_html_encoding_declaration(raw_content)
     try:
-        tree = etree.fromstring(raw_content)
-    except Exception:
-        try:
-            tree = html.fromstring(raw_content)
-        except Exception:
-            return None
+        tree = parse_html(raw_content)
+    except (etree.Error, ValueError):
+        return None
     return _extract_full_body(tree)
 
 
-def _extract_full_body(tree) -> str | None:
+_HIDDEN_TEXT_TAGS = frozenset({"head", "script", "style"})
+_FULL_TEXT_SKIP_CLASSES = frozenset({"bglang", "bgtool", "hd-date", "hd-lg", "hd-oj", "hd-ti"})
+
+
+def _iter_visible_text(
+    element, *, exclude_headers: bool = False, exclude_footnotes: bool = False,
+) -> Iterator[str]:
+    """Visit text once in source order, retaining tails of skipped elements."""
+    if not isinstance(element.tag, str):
+        return
+    tag = etree.QName(element).localname
+    if tag in _HIDDEN_TEXT_TAGS:
+        return
+    if exclude_headers and (
+        element.get("class", "") in _FULL_TEXT_SKIP_CLASSES
+        or element.get("id") == "banner"
+        or (
+            tag == "h1" and element.getparent() is not None
+            and etree.QName(element.getparent()).localname == "body"
+            and is_valid_celex(_extract_text(element))
+        )
+    ):
+        return
+    if exclude_footnotes and tag == "dd" and element.get("id", "").startswith("footnote"):
+        return
+    if element.text and element.text.strip():
+        yield element.text
+    for child in element:
+        yield from _iter_visible_text(
+            child, exclude_headers=exclude_headers, exclude_footnotes=exclude_footnotes,
+        )
+        if child.tail and child.tail.strip():
+            yield child.tail
+
+
+def _extract_full_body(tree, *, exclude_footnotes: bool = False) -> str | None:
     """Extract all visible text from the document body as a single string.
 
     Used as fallback for documents without legislative structure (e.g.
@@ -146,19 +179,9 @@ def _extract_full_body(tree) -> str | None:
     body = tree.xpath(".//*[local-name()='body']")
     root = body[0] if body else tree
 
-    parts: list[str] = []
-    for p in root.iter("{http://www.w3.org/1999/xhtml}p", "p"):
-        if p.xpath(".//*[local-name()='p']"):
-            continue
-        cls = p.get("class", "")
-        # Skip page headers, banners, and language selectors.
-        if cls in ("bglang", "hd-date", "hd-lg", "hd-oj", "hd-ti"):
-            continue
-        text = _extract_text(p)
-        if text:
-            parts.append(text)
-
-    full = " ".join(parts)
+    full = normalize_string(" ".join(_iter_visible_text(
+        root, exclude_headers=True, exclude_footnotes=exclude_footnotes,
+    )))
     return full if full else None
 
 
@@ -408,6 +431,11 @@ _BODY_DESCEND_CLASSES = frozenset({
     "", "norm", "norm inline-element",
 })
 
+_BODY_INLINE_TAGS = frozenset({
+    "a", "abbr", "b", "br", "cite", "code", "del", "em", "i", "img", "ins",
+    "q", "s", "small", "span", "strong", "sub", "sup", "u",
+})
+
 
 def _walk_article_body(article_div) -> list[str]:
     """Collect body_parts from an article div, preserving point-level granularity.
@@ -425,22 +453,36 @@ def _walk_article_body(article_div) -> list[str]:
 
 
 def _collect_body_parts(container, parts: list[str]) -> None:
+    """Keep block boundaries while joining direct text with inline descendants."""
+    inline = [container.text] if container.text and container.text.strip() else []
+    has_mixed_text = bool(inline) or any(child.tail and child.tail.strip() for child in container)
+
+    def flush_inline() -> None:
+        text = normalize_string(" ".join(inline))
+        if text:
+            parts.append(text)
+        inline.clear()
+
     for child in container:
         child_class = child.get("class", "") or ""
-        if child_class in _BODY_SKIP_CLASSES:
-            continue
-        tag = etree.QName(child).localname
-        if tag == "div" and child_class in _BODY_DESCEND_CLASSES:
-            if len(child):
-                _collect_body_parts(child, parts)
-            else:
-                text = _extract_text(child)
-                if text:
-                    parts.append(text)
+        tag = etree.QName(child).localname if isinstance(child.tag, str) else ""
+        if not tag or tag in _HIDDEN_TEXT_TAGS or child_class in _BODY_SKIP_CLASSES:
+            pass
+        elif tag == "div" and child_class in _BODY_DESCEND_CLASSES and len(child):
+            flush_inline()
+            _collect_body_parts(child, parts)
         else:
-            text = _extract_text(child)
-            if text:
+            text = normalize_string(" ".join(_iter_visible_text(child)))
+            # Standalone spans can carry separate point markers. Join inline
+            # siblings only when direct text or tails establish mixed content.
+            if tag in _BODY_INLINE_TAGS and has_mixed_text:
+                inline.append(text)
+            elif text:
+                flush_inline()
                 parts.append(text)
+        if child.tail and child.tail.strip():
+            inline.append(child.tail)
+    flush_inline()
 
 
 
@@ -801,11 +843,11 @@ def _extract_class_based_articles(
 def _extract_class_based_annexes(tree) -> list[dict]:
     """Extract annexes from class-based OJ format.
 
-    Annexes start with <p class="ti-grseq-1"> containing "ANNEX".
+    Annexes start with ti-grseq-1 or oj-ti-grseq-1 paragraphs containing "ANNEX".
     """
     units: list[dict] = []
     headings = tree.xpath(
-        ".//*[local-name()='p' and @class='ti-grseq-1']"
+        ".//*[local-name()='p' and (@class='ti-grseq-1' or @class='oj-ti-grseq-1')]"
     )
 
     for p in headings:
@@ -824,7 +866,10 @@ def _extract_class_based_annexes(tree) -> list[dict]:
         sibling = p.getnext()
         while sibling is not None:
             sib_class = sibling.get("class", "")
-            if sib_class in ("ti-grseq-1", "signatory", "final", "doc-end"):
+            if sib_class in (
+                "ti-grseq-1", "oj-ti-grseq-1", "signatory", "oj-signatory",
+                "final", "oj-final", "doc-end", "oj-doc-end",
+            ):
                 break
             part = _extract_text(sibling)
             if part:
@@ -2070,16 +2115,11 @@ class HtmlExtractor:
         raw_content: bytes,
     ) -> list[dict]:
         """Extract paragraph-level text units from a COM/communication document."""
-        raw_content = normalize_html_encoding_declaration(raw_content)
-        tree = None
         try:
-            tree = etree.fromstring(raw_content)
-        except Exception:
-            try:
-                tree = html.fromstring(raw_content)
-            except Exception as e:
-                logger.error("Failed to parse HTML for COM %s: %s", celex_id, e)
-                return []
+            tree = parse_html(raw_content)
+        except (etree.Error, ValueError) as e:
+            logger.error("Failed to parse HTML for COM %s: %s", celex_id, e)
+            return []
 
         units: list[dict] = []
 
@@ -2094,13 +2134,10 @@ class HtmlExtractor:
 
         # Extract footnotes (modern/transitional only — legacy uses inline [N]).
         footnotes = _extract_com_footnotes(tree)
-        if footnotes:
-            units.extend(footnotes)
-            logger.debug("Extracted %d footnotes from COM %s", len(footnotes), celex_id)
 
-        # Fallback: full body as single unit (same as before).
+        # Footnotes alone do not establish that the substantive body was extracted.
         if not units:
-            body_text = _extract_full_body(tree)
+            body_text = _extract_full_body(tree, exclude_footnotes=bool(footnotes))
             if body_text:
                 units.append({
                     "type": "body",
@@ -2110,6 +2147,10 @@ class HtmlExtractor:
                     "text": body_text,
                 })
                 logger.debug("COM fallback to full body for %s", celex_id)
+
+        if footnotes:
+            units.extend(footnotes)
+            logger.debug("Extracted %d footnotes from COM %s", len(footnotes), celex_id)
 
         logger.info("Extracted %d paragraph units from COM %s", len(units), celex_id)
         return units
@@ -2127,21 +2168,13 @@ class HtmlExtractor:
         out_metadata: dict | None = None,  # ditto — HTML extractor doesn't populate
     ) -> list[dict]:
         """Parse HTML and extract structured text units."""
-        raw_content = normalize_html_encoding_declaration(raw_content)
         units: list[dict] = []
 
-        # Try XHTML first, fall back to plain HTML.
-        tree = None
         try:
-            tree = etree.fromstring(raw_content)
-            logger.debug("Parsed XHTML for %s", celex_id)
-        except Exception:
-            try:
-                tree = html.fromstring(raw_content)
-                logger.debug("Parsed plain HTML for %s", celex_id)
-            except Exception as e:
-                logger.error("Failed to parse any HTML for %s: %s", celex_id, e)
-                return units
+            tree = parse_html(raw_content)
+        except (etree.Error, ValueError) as e:
+            logger.error("Failed to parse any HTML for %s: %s", celex_id, e)
+            return units
 
         # Detect structure and extract. If primary structure yields 0 units,
         # try the next structure type before falling back to body/PDF.

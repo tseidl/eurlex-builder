@@ -159,11 +159,12 @@ def _filter_point_sequence(matches: list) -> list:
     one by at most three base letters (gap tolerance for deleted points).
     Roman sub-points — (ii), (iv), or an (i) far from its neighbours — fail
     these rules and stay inside their parent point's text; a genuine point
-    (i) directly after (h) still validates.
+    (i) directly after (h) still validates. A nested (i), (ii), ... run that
+    resumes at (g) or (h) must not advance the outer sequence to (i).
     """
     kept: list = []
     last_key = 0
-    for m in matches:
+    for index, m in enumerate(matches):
         key = _point_key(m.group(1))
         if key is None:
             continue
@@ -172,6 +173,23 @@ def _filter_point_sequence(matches: list) -> list:
                 kept.append(m)
                 last_key = key
         elif 0 < key - last_key <= 300:
+            if (
+                m.group(1) == "i"
+                and index + 1 < len(matches)
+                and matches[index + 1].group(1) == "ii"
+            ):
+                # Resumption before (i) disambiguates a roman list under
+                # (f)/(g). Without that evidence, retain the existing rule.
+                resumed_key = next(
+                    (
+                        _point_key(candidate.group(1))
+                        for candidate in matches[index + 2:]
+                        if not re.fullmatch(r"[ivxlcdm]+", candidate.group(1))
+                    ),
+                    None,
+                )
+                if resumed_key is not None and last_key < resumed_key < key:
+                    continue
             kept.append(m)
             last_key = key
     return kept

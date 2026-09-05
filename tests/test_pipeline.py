@@ -8,6 +8,7 @@ from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.extractors.html import HtmlExtractor
 from eurlex_builder.pipeline import (
     Pipeline,
+    RunResult,
     _merge_pdf_structure_improvements,
     _should_run_translate_fallback,
     _translated_parse_is_better,
@@ -487,7 +488,7 @@ def test_fresh_run_resets_only_selected_checkpoints(monkeypatch, tmp_path):
         "processed": 1, "failed": 0, "failed_details": {},
     }
     pipeline = Pipeline(config, None, [], store, checkpoint)
-    monkeypatch.setattr(pipeline, "_run_sequential", lambda ids: None)
+    monkeypatch.setattr(pipeline, "_run_sequential", lambda ids: RunResult(len(ids)))
     monkeypatch.setattr(pipeline, "_report_missing_content", lambda: None)
     monkeypatch.setattr(pipeline, "_report_extraction_stats", lambda: None)
     monkeypatch.setitem(
@@ -531,7 +532,11 @@ def test_resume_limit_processes_bounded_subset_without_narrowing_selection(
     }
     processed = []
     pipeline = Pipeline(config, None, [], store, checkpoint)
-    monkeypatch.setattr(pipeline, "_run_sequential", processed.extend)
+    def process(ids):
+        processed.extend(ids)
+        return RunResult(len(ids))
+
+    monkeypatch.setattr(pipeline, "_run_sequential", process)
     monkeypatch.setattr(pipeline, "_report_missing_content", lambda: None)
     monkeypatch.setattr(pipeline, "_report_extraction_stats", lambda: None)
     monkeypatch.setitem(

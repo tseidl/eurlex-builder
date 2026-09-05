@@ -1,2 +1,3 @@
 recursive-include configs *.yaml
 recursive-include tests *.py
+recursive-include tests/fixtures *.xhtml *.json *.md

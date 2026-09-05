@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eurlex-builder"
-version = "0.1.1"
+version = "0.2.0"
 description = "Build research-ready datasets from EU legislative data (EUR-Lex / Cellar)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -55,6 +55,7 @@ dev = [
     "eurlex-builder[all]",
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "rdflib>=7.0",
     "ruff>=0.16",
     "mypy>=1.15",
     "build>=1.2",

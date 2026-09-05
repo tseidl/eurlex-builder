@@ -234,7 +234,7 @@ data:
 | `document_types` | list of strings | — | Required. At least one. Mapped to CELEX type codes (`regulation`→R, `directive`→L, `decision`→D, `communication`→DC, `proposal`→PC, `staff working document`→SC) |
 | `start_date` | date | — | Required (`YYYY-MM-DD`) |
 | `end_date` | date | — | Required, must be after `start_date` |
-| `filter_keywords` | list of strings | `[]` | EuroVoc keyword filter. Empty = no filter |
+| `filter_keywords` | list of strings | `[]` | EuroVoc keyword filter. Empty = no filter; no matched or accepted concepts stops discovery with an error |
 | `include_corrigenda` | bool | `false` | Include corrigenda |
 | `include_consolidated_texts` | bool | `false` | Include consolidated texts (CELEX sector 0) |
 
@@ -249,7 +249,7 @@ data:
 | `include_articles` | bool | `true` | Extract articles (operative provisions) |
 | `include_annexes` | bool | `true` | Extract annexes |
 | `strip_boilerplate` | bool | `true` | Strip signature blocks ("Done at Brussels…") and binding clauses from the last article |
-| `store_raw_html` | bool | `false` | Store raw HTML in `works.full_text_html`. Substantially increases DB size; useful for debugging |
+| `store_raw_html` | bool | `false` | Store decoded source markup in `works.full_text_html`, using its declared encoding without rewriting the HTML. Substantially increases DB size; useful for debugging |
 | `article_granularity` | `"article"` \| `"paragraph"` \| `"point"` | `"article"` | One row per article (default), per numbered paragraph, or per lettered point. See **Granularity** below |
 
 </details>
@@ -343,6 +343,17 @@ interrupted `--fresh` rebuild, re-run without `--fresh` to resume the new
 rebuild rather than clearing its completed checkpoints again.
 `--limit` is intended for canary runs and cannot be combined with `--fresh`.
 
+If any document attempted in this invocation fails, the command exits with
+status **1** after saving and exporting successful results. Its run manifest
+records `complete_with_failures`. Historical failures outside the attempted
+selection do not affect this exit status. Use `--retry-failed` to retry failures.
+A Python call to `Pipeline.run()` returns `RunResult(processed, failed)` with
+counts for the invocation; discovery and other fatal errors still raise.
+
+Keyword filtering stops with an error if no EuroVoc concepts match or all
+matches are rejected. Set `filter_keywords: []` explicitly for an unfiltered
+date/type search. Failed selection leaves existing checkpoints intact.
+
 ### `eurlex-builder translate <db>`
 
 Translate non-English content. Resumable; skips already-translated rows.
@@ -410,7 +421,7 @@ Run read-only integrity checks for checkpoint/work consistency, orphaned rows, s
 | `language` | VARCHAR | Language of fetched content; NULL when no content could be fetched |
 | `full_text` | VARCHAR | Full document text (translated to English if non-English source) |
 | `full_text_original` | VARCHAR | Original-language text (non-English docs only) |
-| `full_text_html` | VARCHAR | Raw HTML (only if `store_raw_html: true`) |
+| `full_text_html` | VARCHAR | Decoded source HTML markup (only if `store_raw_html: true`); not an archive of exact response bytes |
 | `content_source` | VARCHAR | Provenance tag (`cellar_html_eng`, `cellar_pdf_fra`, …). Suffixes record fallbacks — see below |
 | `date_entry_into_force` | DATE | Populated by `enrich` |
 | `date_end_of_validity` | DATE | Populated by `enrich`; `9999-12-31` if still in force |
@@ -674,7 +685,6 @@ If you use this package, please cite the accompanying paper and the software:
   title   = {eurlex-builder: a configurable Python pipeline for EU legislative datasets},
   year    = {2026},
   url     = {https://github.com/tseidl/eurlex-builder},
-  version = {0.1.0},
   doi     = {10.5281/zenodo.21496963}
 }
 ```

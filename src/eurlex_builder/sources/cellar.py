@@ -8,7 +8,7 @@ from datetime import date, datetime
 from urllib.parse import quote
 
 import requests
-from lxml import etree, html
+from lxml import html
 from requests.adapters import HTTPAdapter
 from SPARQLWrapper import SPARQLWrapper
 from urllib3.util.retry import Retry
@@ -17,7 +17,6 @@ from eurlex_builder.errors import TransientSourceError
 from eurlex_builder.utils import (
     RateLimiter,
     get_document_type,
-    normalize_html_encoding_declaration,
     resolve_doc_type,
 )
 
@@ -210,38 +209,6 @@ def _truncate_at_annex(html_bytes: bytes, celex_id: str) -> bytes:
     return html_bytes
 
 
-def _flatten_content_divs(html_bytes: bytes, celex_id: str) -> bytes:
-    """Flatten <div class='content'> elements by moving their children to the parent."""
-    html_bytes = _truncate_at_annex(html_bytes, celex_id)
-    html_bytes = normalize_html_encoding_declaration(html_bytes)
-    try:
-        tree = etree.fromstring(html_bytes)
-        for div in tree.xpath(".//*[local-name()='div' and @class='content']"):
-            parent = div.getparent()
-            if parent is not None:
-                index = parent.index(div)
-                for child in reversed(list(div)):
-                    parent.insert(index, child)
-                parent.remove(div)
-        return etree.tostring(tree, encoding="utf-8")
-    except Exception:
-        try:
-            tree = html.fromstring(html_bytes)
-            for div in tree.xpath(".//*[local-name()='div' and @class='content']"):
-                parent = div.getparent()
-                if parent is not None:
-                    index = parent.index(div)
-                    for child in reversed(list(div)):
-                        parent.insert(index, child)
-                    parent.remove(div)
-            return html.tostring(tree, encoding="utf-8")
-        except Exception as exc:
-            logger.warning(
-                "Failed to flatten content divs for %s: %s", celex_id, exc
-            )
-            return html_bytes
-
-
 def _build_metadata_query(celex_id: str) -> str:
     """Build the SPARQL query for fetching metadata and relations."""
     encoded = quote(celex_id, safe="")
@@ -351,6 +318,7 @@ def _build_descriptive_query(
     """Build a SPARQL query that discovers CELEX IDs matching descriptive criteria."""
     # Map human-readable types to CELEX type codes and collect required sectors.
     type_conditions: list[str] = []
+    consolidated_type_conditions: list[str] = []
     sectors: set[str] = set()
 
     for dt in document_types:
@@ -361,12 +329,19 @@ def _build_descriptive_query(
         code, sector = resolved
         type_conditions.append(f'?type = "{code}"^^xsd:string')
         sectors.add(sector)
+        if sector == "3":
+            consolidated_type_conditions.append(f'?type = "{code}"^^xsd:string')
 
     if not type_conditions:
         raise ValueError("No supported document types remain after mapping")
 
     type_filter = f"FILTER({' || '.join(type_conditions)})"
     sector_conditions = [f'?sector = "{s}"^^xsd:string' for s in sorted(sectors)]
+    if include_consolidated_texts and consolidated_type_conditions:
+        sector_conditions.append(
+            '(?sector = "0"^^xsd:string && '
+            f"({' || '.join(consolidated_type_conditions)}))"
+        )
     sector_filter = f"FILTER({' || '.join(sector_conditions)})"
 
     date_filters = (
@@ -582,7 +557,7 @@ class CellarSource:
                             "Content for %s found in %s (not English)",
                             celex_id, lang,
                         )
-                    return (_flatten_content_divs(content, celex_id), "html", lang)
+                    return (_truncate_at_annex(content, celex_id), "html", lang)
 
             # Try PDF for this language before falling back to next language.
             if pdf_lookup_failed:

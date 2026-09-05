@@ -45,3 +45,4 @@ docs/*.html
 .coverage
 .python-version
 AGENTS.md
+CLAUDE.md

@@ -2,11 +2,41 @@
 
 from __future__ import annotations
 
+import pytest
+
 from eurlex_builder.extractors.splitter import (
     _find_quoted_regions,
     is_amending_article,
     split_article,
 )
+
+
+@pytest.mark.parametrize("parent", ["f", "g"])
+def test_roman_subpoints_preserve_resumed_outer_sequence(parent):
+    letters = list("abcdefghij")
+    parts = ["1. The following conditions apply:"]
+    for letter in letters:
+        parts.append(f"({letter}) Condition {letter}.")
+        if letter == parent:
+            parts.extend([
+                "(i) First nested obligation;", "(ii) Second nested obligation;",
+                "(iii) Third nested obligation;", "(iv) Fourth nested obligation;",
+                "(v) Final nested obligation.",
+            ])
+    units = split_article(parts, number="1", title=None, granularity="point")
+    assert [u["point_letter"] for u in units if u["point_letter"]] == letters
+    parent_unit = next(u for u in units if u["point_letter"] == parent)
+    assert parent_unit["text"].endswith("(v) Final nested obligation.")
+    assert "(i) First nested obligation; (ii) Second nested obligation;" in parent_unit["text"]
+    assert next(u for u in units if u["point_letter"] == "i")["text"] == "Condition i."
+
+
+def test_genuine_outer_i_with_roman_continuation_remains_outer_i():
+    parts = ["1. Conditions:", *[f"({letter}) Condition {letter}." for letter in "abcdefgh"]]
+    parts.extend(["(i) Genuine outer item containing:", "(ii) Nested second item.", "(j) Final item."])
+    units = split_article(parts, number="1", title=None, granularity="point")
+    assert [u["point_letter"] for u in units if u["point_letter"]] == list("abcdefghij")
+    assert next(u for u in units if u["point_letter"] == "i")["text"].endswith("(ii) Nested second item.")
 
 # ---------------------------------------------------------------------------
 # Article-level (default) — must reproduce current behavior bit-for-bit.

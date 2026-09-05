@@ -7,6 +7,10 @@ class EurlexBuilderError(RuntimeError):
     """Base exception for recoverable pipeline failures."""
 
 
+class SelectionError(ValueError):
+    """Configured discovery criteria did not produce a usable selection."""
+
+
 class TransientSourceError(EurlexBuilderError):
     """A data source request failed transiently and should be retried."""
 
