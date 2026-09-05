@@ -1,0 +1,62 @@
+[
+  {
+    "fixture": "gdpr-article-7-eng.xhtml",
+    "celex_id": "32016R0679",
+    "language": "eng",
+    "source_url": "http://publications.europa.eu/resource/cellar/3e485e15-11bd-11e6-ba9a-01aa75ed71a1.0006.03/DOC_1",
+    "downloaded_at_utc": "2026-09-05T20:54:18.651418Z",
+    "source_sha256": "962539af03738bf552319ff4ce42d69e5f95a576307c4dfed7bf87e81b646b9d",
+    "element_id": "art_7",
+    "fixture_sha256": "42891a6a57331cdd794d5592a0c574119df287d225e874ceb4ba8b9b7506d811"
+  },
+  {
+    "fixture": "gdpr-article-7-deu.xhtml",
+    "celex_id": "32016R0679",
+    "language": "deu",
+    "source_url": "http://publications.europa.eu/resource/cellar/3e485e15-11bd-11e6-ba9a-01aa75ed71a1.0004.03/DOC_1",
+    "downloaded_at_utc": "2026-09-05T20:54:19.001904Z",
+    "source_sha256": "219040a03cea829785c9f9752dcab9bfcee7b3c012092f5da8567640a816116d",
+    "element_id": "art_7",
+    "fixture_sha256": "caa214152a7ae6cc264742edc306fd7d07a7ccd3c3b482ac16e10faf7d7a76c5"
+  },
+  {
+    "fixture": "gdpr-article-7-ell.xhtml",
+    "celex_id": "32016R0679",
+    "language": "ell",
+    "source_url": "http://publications.europa.eu/resource/cellar/3e485e15-11bd-11e6-ba9a-01aa75ed71a1.0005.03/DOC_1",
+    "downloaded_at_utc": "2026-09-05T20:54:19.375086Z",
+    "source_sha256": "daf6524b188bba0e7c20c05d1f1afdf8ebe3cb9d511833c559014adb7a7fc78c",
+    "element_id": "art_7",
+    "fixture_sha256": "3bc2fa044dc2fec5846f9fcd5ea29a326b86635fb38d0aadaefd50e580ff1566"
+  },
+  {
+    "fixture": "dora-article-60-eng.xhtml",
+    "celex_id": "32022R2554",
+    "language": "eng",
+    "source_url": "http://publications.europa.eu/resource/cellar/0caf473a-85bd-11ed-9887-01aa75ed71a1.0006.03/DOC_1",
+    "downloaded_at_utc": "2026-09-05T20:54:20.409329Z",
+    "source_sha256": "cf50d8f023d23b2a56f535aaee0760eba7f1925ef08a9858c5c31d43d414f46b",
+    "element_id": "art_60",
+    "fixture_sha256": "95b0ba48054bff5a6b233ac2ab824397cd6e3c7fc8335de24f1aaa801cbbff74"
+  },
+  {
+    "fixture": "consolidated-gdpr-article-7-eng.xhtml",
+    "celex_id": "02016R0679-20160504",
+    "language": "eng",
+    "source_url": "http://publications.europa.eu/resource/cellar/5f2552c2-cc45-11e6-ad7c-01aa75ed71a1.0022.03/DOC_1",
+    "downloaded_at_utc": "2026-09-05T20:54:15.374336Z",
+    "source_sha256": "a681ff22f32f125749af6e96947224369efc132edb8a95b12637e357df1056de",
+    "element_id": "art_7",
+    "fixture_sha256": "6d5d81886d7c5ef85528726e44395451a5c9b39c1ab2522b3d4a5f19ba40fa1e"
+  },
+  {
+    "fixture": "consolidated-gdpr-article-7-deu.xhtml",
+    "celex_id": "02016R0679-20160504",
+    "language": "deu",
+    "source_url": "http://publications.europa.eu/resource/cellar/5f2552c2-cc45-11e6-ad7c-01aa75ed71a1.0001.02/DOC_3",
+    "downloaded_at_utc": "2026-09-05T20:54:15.643029Z",
+    "source_sha256": "ad895d90dc35be2f12371af880380af2282c68f370b3d207e5a7e8186cc094a1",
+    "element_id": "art_7",
+    "fixture_sha256": "fd1265fa495df39c26d248266000108d7196cfc88f267c3ba0a0276a78cff65c"
+  }
+]

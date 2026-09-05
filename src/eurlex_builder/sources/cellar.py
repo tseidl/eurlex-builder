@@ -907,7 +907,8 @@ WHERE {{
     # ------------------------------------------------------------------
 
     def _fetch_with_300_handling(
-        self, url: str, headers: dict, celex_id: str
+        self, url: str, headers: dict, celex_id: str,
+        *, out_metadata: dict | None = None,
     ) -> bytes | None:
         """GET a URL, handling HTTP 300 Multiple Choices responses."""
         _rate_limiter.wait()
@@ -937,6 +938,13 @@ WHERE {{
                 raise TransientSourceError(
                     f"Selected 300 candidate request failed for {celex_id}"
                 ) from exc
+
+        if out_metadata is not None:
+            out_metadata.update({
+                "source_url": response.url,
+                "http_status": response.status_code,
+                "content_language": response.headers.get("Content-Language", ""),
+            })
 
         if response.status_code == 200:
             # An empty 200 body is as useless as a 404.

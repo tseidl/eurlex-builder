@@ -11,7 +11,9 @@ logger = logging.getLogger("eurlex_builder")
 TABLES = ["works", "text_units", "relations", "eurovoc"]
 
 
-def export_tables(conn, output_dir: str, formats: Sequence[str]) -> None:
+def export_tables(
+    conn, output_dir: str, formats: Sequence[str], *, tables: Sequence[str] = TABLES,
+) -> None:
     """Export all data tables to the requested formats."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -19,7 +21,7 @@ def export_tables(conn, output_dir: str, formats: Sequence[str]) -> None:
     # Enable large string buffers for tables exceeding 2GB of text.
     conn.execute("SET arrow_large_buffer_size = true")
 
-    for table in TABLES:
+    for table in tables:
         # DuckDB's native Polars export (via Arrow) for reliable type handling.
         # Empty tables are exported too (with their schema) so downstream
         # code can rely on all four files existing.

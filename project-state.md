@@ -14,6 +14,9 @@ created for this work.
 
 The prepared release is **0.2.0**, to be tagged **v0.2.0**, with the title
 “eurlex-builder 0.2.0 — HTML extraction refinements and reliability fixes”.
+Its target remains `main` at `5af1b03`; the optional multilingual feature is
+implemented separately on `feature/official-multilingual` and must not be
+included in that prepared maintenance tag.
 [Release notes](docs/release-notes-0.2.0.md) are prepared. The release commit must pass
 CI before its tag is pushed, because tag pushes start PyPI publication
 independently of CI. Publishing the GitHub Release is the separate Zenodo step.
@@ -52,3 +55,49 @@ Keep the six extraction strategies distinct. Ambiguous Roman-point nesting
 retains its existing heuristic. Broader communications/proposals/staff-document
 coverage, multipart Cellar streams, exact source caching, and an explicit
 export command remain future work; court cases are outside this batch.
+
+[Issue #1](https://github.com/tseidl/eurlex-builder/issues/1) proposes optional
+extraction of aligned official language versions; the contributor offered to
+implement it. The user approved the opt-in direction and then requested that
+we implement it now and draft a reply for approval before posting.
+
+The implementation is on `feature/official-multilingual`. The separate
+`eurlex-builder multilingual <db> --languages eng deu fra` command reads the
+input database's CELEX list without writes. It produces a separate DuckDB
+database and Parquet/CSV exports containing official HTML articles, directly
+anchored numbered paragraphs, expression statuses and language coverage.
+Original response bytes, hashes, URLs and language evidence are retained.
+The ordinary pipeline, configuration defaults and analytical tables are
+unchanged. No machine translation runs on this optional path. It resumes by
+document and language; unavailable or unsupported HTML is explicit, and failed
+requests cause exit 1 after successful data have been exported.
+
+The scope is source-ID alignment in HTML. Legacy layouts without supported IDs,
+PDFs, recitals, annexes and point-level alignment are outside this mode. Dated
+consolidated texts can contribute articles where paragraph anchors are absent.
+Quoted replacement-law identifiers stay in the enclosing amending provision.
+Matching IDs do not establish text completeness or semantic equivalence.
+
+Validation adds 39 tests, including original-database byte preservation,
+resumption, incomplete coverage, conflicting language labels, and six live
+source excerpts. All 375 local tests pass, as do Ruff, the local Python 3.14
+type check, and wheel/source builds with `twine check`. Both artifacts exclude
+the local instruction files; the source archive includes the six new fixtures.
+Supported Python 3.11/3.13 type checking runs in branch CI. A live check
+downloaded 20 document/language pairs across
+DORA, UCITS, GDPR and a dated GDPR consolidation in English, German, Greek,
+Croatian and Irish. Replaying the saved responses with the final extractor
+produced 18 extracted expressions (five at article level only), one unsupported
+Croatian UCITS layout, and one unavailable Irish UCITS HTML response. All
+supported source-ID sets matched English; 5,754 units were retained. A resume
+made no new requests and left units unchanged. See the
+[validation manifest](docs/multilingual-validation-2026-09-05.json).
+[Branch CI](https://github.com/tseidl/eurlex-builder/actions?query=branch%3Afeature%2Fofficial-multilingual)
+tracks supported-version checks.
+
+The user wants a friendly, informal issue reply: thank the contributor, explain
+the optional command plainly, credit their checks and describe our smaller
+related sample accurately. Posting requires approval of the actual draft; no
+reply has been posted. Keep the issue open for feedback, check it next session,
+and close it only if the request is resolved. Local `AGENTS.md` now instructs
+both tools to check open issues and relevant comments at the start of work.

@@ -91,6 +91,32 @@ def main(argv: list[str] | None = None) -> None:
     )
     validate_parser.add_argument("db", help="Path to DuckDB database file.")
 
+    multilingual_parser = sub.add_parser(
+        "multilingual", help="Extract official language versions into a separate dataset."
+    )
+    multilingual_parser.add_argument(
+        "db", help="Existing dataset (read-only source of CELEX IDs)."
+    )
+    multilingual_parser.add_argument(
+        "--languages", nargs="+", required=True,
+        help="Official EU language codes, e.g. eng deu fra (en de fr also accepted).",
+    )
+    multilingual_parser.add_argument(
+        "--output-directory",
+        help="Separate output directory (default: <database-name>-multilingual).",
+    )
+    multilingual_parser.add_argument(
+        "--formats", nargs="+", choices=["parquet", "csv"], default=["parquet"],
+    )
+    multilingual_parser.add_argument(
+        "--limit", type=_positive_int,
+        help="Process at most this many remaining documents, across requested languages.",
+    )
+    multilingual_parser.add_argument(
+        "--retry-unavailable", action="store_true",
+        help="Retry unavailable or unsupported HTML; failed requests are retried automatically.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -117,6 +143,11 @@ def main(argv: list[str] | None = None) -> None:
                 max_workers=args.max_workers, force=args.force)
     elif args.command == "validate":
         _validate(args.db)
+    elif args.command == "multilingual":
+        _multilingual(
+            args.db, languages=args.languages, output_directory=args.output_directory,
+            formats=args.formats, limit=args.limit, retry_unavailable=args.retry_unavailable,
+        )
     else:
         parser.print_help()
         sys.exit(1)
@@ -131,6 +162,25 @@ def _require_db(db_path: str) -> None:
     from pathlib import Path
     if not Path(db_path).exists():
         sys.exit(f"Error: database file not found: {db_path}")
+
+
+def _multilingual(db_path: str, **kwargs) -> None:
+    """Run the optional official-language export without modifying the input dataset."""
+    _require_db(db_path)
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    from eurlex_builder.multilingual import extract_multilingual_database
+    try:
+        result = extract_multilingual_database(db_path, **kwargs)
+    except ValueError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
+    print(f"Multilingual output: {result.output_directory}")
+    print(
+        f"Extracted: {result.extracted}; skipped: {result.skipped}; "
+        f"unavailable: {result.unavailable}; unsupported: {result.unsupported}; failed: {result.failed}"
+    )
+    if result.failed:
+        raise SystemExit(1)
 
 
 def _run(
