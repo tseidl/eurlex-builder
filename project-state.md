@@ -1,6 +1,6 @@
 # Current project state
 
-Updated 5 September 2026. This is the canonical shared current-state file.
+Updated 6 September 2026. This is the canonical shared current-state file.
 
 The paper dataset and its version-specific Zenodo software archive remain
 frozen. Do not rebuild or repair those data as part of package maintenance.
@@ -80,6 +80,10 @@ consolidated texts can contribute articles where paragraph anchors are absent.
 Quoted replacement-law identifiers stay in the enclosing amending provision.
 Matching IDs do not establish text completeness or semantic equivalence.
 
+The user regards this as a niche optional feature. The README explains it only
+in the FAQ, with detailed usage in
+[the multilingual extraction guide](docs/multilingual-extraction.md).
+
 Validation adds 39 tests, including original-database byte preservation,
 resumption, incomplete coverage, conflicting language labels, and six live
 source excerpts. All 375 local tests pass, as do Ruff, the local Python 3.14
@@ -97,9 +101,16 @@ made no new requests and left units unchanged. See the
 [Main CI](https://github.com/tseidl/eurlex-builder/actions?query=branch%3Amain)
 tracks supported-version checks.
 
+The combined implementation and release notes at `e28519b` passed
+[CI on Python 3.11 and 3.13](https://github.com/tseidl/eurlex-builder/actions/runs/33993270859).
+Subsequent documentation changes must be included in the release's CI and build
+checks before tagging.
+
 The user wants a friendly, informal issue reply: thank the contributor, explain
-the optional command plainly, credit their checks and describe our smaller
-related sample accurately. Posting requires approval of the actual draft; no
-reply has been posted. Keep the issue open for feedback, check it next session,
+how corresponding official passages are paired across selectable languages,
+credit their checks and describe our smaller related sample accurately. On
+6 September the user requested publication of 0.2.0 and posting of the revised
+reply after final approval; that approval has not yet been given. No reply has
+been posted. Keep the issue open for feedback, check it next session,
 and close it only if the request is resolved. Local `AGENTS.md` now instructs
 both tools to check open issues and relevant comments at the start of work.
