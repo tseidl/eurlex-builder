@@ -435,7 +435,7 @@ Run read-only integrity checks for checkpoint/work consistency, orphaned rows, s
 | `enriched_at` | TIMESTAMP | Most recent enrichment timestamp; category completion is tracked internally in `_enrichment_checkpoint` |
 
 **`content_source` suffixes.** The base tag names the format and language that
-supplied the text. Three suffixes record that a fallback path was taken:
+supplied the text. Suffixes record fallback and recovery steps:
 
 - `__pdf_<lang>_fallback_<structures>` — corroborated units of the named
   structural types were added from a same-language PDF while the HTML text was
@@ -443,6 +443,11 @@ supplied the text. Three suffixes record that a fallback path was taken:
 - `__pymupdf_<reason>` — degraded PDF extraction after a Docling timeout,
   partial result, crash, conversion error, oversize guard, or empty result.
 - `__translated` — translate-before-extract output (see the FAQ).
+- Since 0.3.0, `__recital_footnotes` and
+  `__preamble_columns` record conservative preamble cleanup on the PyMuPDF
+  fallback; `__pymupdf_headings` records a Docling heading move corroborated
+  against the same PDF's text layer. The stored `full_text` retains the original
+  text layer.
 
 </details>
 
@@ -625,14 +630,16 @@ Descriptive mode filters by CELEX type code (D, R, L) and sector. The `{eurlex}`
 <details>
 <summary><strong>Why does a <code>--fresh</code> re-run produce slightly different row counts for PDF-extracted documents?</strong></summary>
 
-Docling's PDF layout parser can segment paragraphs differently across versions. Recital and article counts may vary slightly for PDF-sourced documents even when the text content is the same. This is a Docling version sensitivity, not a pipeline bug.
+PDF counts can change when Docling's segmentation changes, a document takes the PyMuPDF fallback, or a parser fix changes structural recognition. Check `content_source` and the run manifest for the extraction path and software versions. Compare the preserved `full_text` as well as unit counts; matching counts alone do not establish complete or correctly ordered text.
 
 </details>
 
 <details>
 <summary><strong>What is the translate-before-extract fallback?</strong></summary>
 
-The legislative PDF extractor uses English-only markers (`Whereas:`, `HAS ADOPTED THIS REGULATION:`, `ANNEX`). For non-English PDFs where these markers don't fire, the pipeline translates the Docling markdown to English via Opus-MT and re-parses from there. This fires when a requested structure is conspicuously missing, including fewer than three requested recitals or no requested articles. The translated parse is adopted only when at least one requested structure count improves and none regress. Translation is all-or-nothing under the same quality guards used by the standalone command. Affected rows are marked with `content_source` ending in `__translated` and have `text_translated` pre-filled. The alternative — adding native markers for every EU language — was rejected as a maintenance burden.
+For non-English legislative PDFs, the pipeline can translate the extracted markdown to English via Opus-MT and re-parse it when requested structures are missing. This includes fewer than three requested recitals or no requested articles. The translated parse is adopted only when at least one requested structure count improves and none regress. Translation is all-or-nothing under the same quality guards used by the standalone command. Affected rows are marked with `content_source` ending in `__translated` and have `text_translated` pre-filled.
+
+Since 0.3.0, article headings, recital openers and signature/annex boundaries are also recognised directly in French, German, Italian, Dutch and Spanish — the existing non-English fetch fallback languages. This retains source-language structure even if translation fails. The PyMuPDF fallback uses font and position evidence to exclude identified recital footnotes, and repairs a narrow layout with the preamble on the left and operative text starting the right column. Ambiguous layouts keep their existing handling; general column reconstruction is not implemented. See the [PDF recovery validation](https://github.com/tseidl/eurlex-builder/blob/main/docs/pdf-preamble-review-2026-09-17.md) for scope and remaining limitations.
 
 </details>
 
@@ -668,10 +675,8 @@ config.yaml (Pydantic-validated)
   │                               PDF: persistent isolated Docling workers, with
   │                               per-document hard timeouts and pymupdf fallback
   │     translate-before-extract — Opus-MT fallback when a non-English legislative
-  │                                PDF misses requested structures (English-only
-  │                                markers like "Whereas:" wouldn't fire on a French
-  │                                or German PDF). Translates the Docling markdown
-  │                                and re-parses from English.
+  │                                PDF misses requested structures. Translates the
+  │                                extracted markdown and re-parses from English.
   │     storage                 — DuckDB: works, text_units, relations, checkpoint
   ├─ Translation                — Opus-MT, sequential post-processing
   ├─ Enrichment                 — SPARQL: dates, ELI, procedure, EuroVoc, repeals

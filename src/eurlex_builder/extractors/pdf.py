@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import IO, Literal
 
 from eurlex_builder.errors import DoclingStartupError
+from eurlex_builder.extractors.pdf_headings import repair_docling_heading
+from eurlex_builder.extractors.pdf_languages import LEGISLATIVE_MARKERS, is_next_annex
+from eurlex_builder.extractors.pdf_layout import prepare_pymupdf_structure
 from eurlex_builder.extractors.splitter import (
     _find_quoted_regions,
     _is_in_quoted_region,
@@ -772,12 +775,35 @@ class PdfExtractor:
         decision lives at Pipeline level because it needs document type and
         the ability to update `works.content_source` with provenance.
         """
+        extraction_metadata = out_metadata if out_metadata is not None else {}
         markdown = extract_pdf_markdown(
-            celex_id, raw_content, out_metadata=out_metadata,
+            celex_id, raw_content, out_metadata=extraction_metadata,
         )
         if not markdown:
             logger.warning("PDF extraction returned empty text for %s", celex_id)
             return []
+
+        source_markdown = markdown
+        pymupdf_text = ""
+        if include_articles and extraction_metadata.get("pdf_backend") == "docling":
+            pymupdf_text = (
+                extraction_metadata.get("pdf_text_layer")
+                if "pdf_text_layer" in extraction_metadata
+                else extract_pdf_full_text(raw_content)
+            ) or ""
+            if pymupdf_text:
+                markdown, heading_repair = repair_docling_heading(markdown, pymupdf_text, language)
+                if heading_repair:
+                    extraction_metadata["pdf_heading_repair"] = heading_repair
+                    if heading_repair["status"] == "repaired":
+                        extraction_metadata["pdf_representation_repair"] = "pymupdf_headings"
+                        extraction_metadata["markdown"] = markdown
+                        logger.info("Recovered displaced PDF heading for %s: %s", celex_id, heading_repair)
+                    else:
+                        logger.warning("Retaining PDF heading order for %s: %s", celex_id, heading_repair)
+        layout_changes: dict[str, list[int]] = {}
+        if extraction_metadata.get("pdf_backend") == "pymupdf":
+            markdown, layout_changes = prepare_pymupdf_structure(raw_content, markdown, language)
 
         # Parse the markdown into structured text units.
         units = _parse_legislative_markdown(
@@ -786,18 +812,18 @@ class PdfExtractor:
             include_articles=include_articles,
             include_annexes=include_annexes,
             article_granularity=article_granularity,
+            language=language,
         )
+        if layout_changes and units:
+            extraction_metadata["pdf_layout_changes"] = layout_changes
+            extraction_metadata["markdown"] = markdown
+            logger.info("PDF preamble cleanup for %s: %s", celex_id, layout_changes)
 
         if (
             include_articles
             and out_metadata is not None
             and out_metadata.get("pdf_backend") == "docling"
         ):
-            pymupdf_text = (
-                out_metadata.get("pdf_text_layer")
-                if "pdf_text_layer" in out_metadata
-                else extract_pdf_full_text(raw_content)
-            )
             if pymupdf_text:
                 pymupdf_units = _parse_legislative_markdown(
                     pymupdf_text,
@@ -805,12 +831,15 @@ class PdfExtractor:
                     include_articles=include_articles,
                     include_annexes=include_annexes,
                     article_granularity=article_granularity,
+                    language=language,
                 )
                 units, repaired = _merge_complete_pymupdf_articles(
                     units, pymupdf_units,
                 )
                 if repaired:
-                    out_metadata["pdf_representation_repair"] = "pymupdf_articles"
+                    out_metadata["pdf_representation_repair"] = "__".join(filter(None, [
+                        out_metadata.get("pdf_representation_repair"), "pymupdf_articles",
+                    ]))
                     logger.info(
                         "Recovered a complete article sequence for %s from "
                         "the PDF text layer",
@@ -827,7 +856,7 @@ class PdfExtractor:
                 "type": "body",
                 "number": None,
                 "title": None,
-                "text": markdown.strip(),
+                "text": source_markdown.strip(),
             }]
 
         logger.info("Extracted %d text units from PDF for %s", len(units), celex_id)
@@ -855,6 +884,9 @@ _PDF_INLINE_REF_RE = re.compile(
 _PDF_LEADING_REFERENCE_FRAGMENT_RE = re.compile(
     r"^-?\s*\(\d+\)\s+(?:of|to|thereof)\b",
 )
+_PDF_ARTICLE_REFERENCE_PREFIX_RE = re.compile(
+    r"\b(?:of|to|in|under|by|with|and|or|see|from)\s*$", re.IGNORECASE,
+)
 _PDF_FOOTNOTE_REF_RE = re.compile(
     r"^-?\s*\(\d+\)\s+(?:OJ\s+(?:No\s+)?[LC]?\s*\d|"
     r"\[\d{4}\]\s*ECR|Ibidem|Ibid\.|Cf\.\s)",
@@ -867,6 +899,10 @@ _PDF_RECITAL_TAIL_OJ_RE = re.compile(
 # OJ footnote line ("( 1 ) OJ L 169, 12.7.1993, p. 1.") — trailing noise
 # after the last annex, not annex content. Tolerates Docling's "( 1 )" spacing.
 _OJ_FOOTNOTE_LINE_RE = re.compile(r"^-?\s*\(\s*\d+\s*\)\s*OJ\b")
+_PDF_PAGE_HEADER_LINE_RE = re.compile(
+    r"^(?:EN|Official Journal of the European (?:Union|Communities)|"
+    r"(?:No\s+)?[LC]\s*\d+/\d+|\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{2,4})$",
+)
 
 
 def _pdf_classify_recital(text: str) -> str | None:
@@ -1019,6 +1055,11 @@ def _repair_embedded_operative_markers(lines: list[str]) -> list[str]:
         formula = next(
             (
                 match for match in formula_re.finditer(line)
+                if match.group("formula").isupper() or (
+                    not line[:match.start()].strip()
+                    and re.search(r"\b(?:THIS|THE\s+FOLLOWING|AS\s+FOLLOWS)\b",
+                                  match.group("formula"), re.I)
+                )
                 if not _is_in_quoted_region(
                     line_offsets[line_index] + match.start(), quoted_regions,
                 )
@@ -1313,18 +1354,40 @@ def _parse_legislative_markdown(
     include_articles: bool,
     include_annexes: bool,
     article_granularity: str = "article",
+    language: str = "eng",
 ) -> list[dict]:
     """Parse Docling markdown output into legislative text units.
 
     Handles the same patterns as the text-only HTML extractor but adapted
     for markdown output (headings marked with ##, paragraphs separated by
-    blank lines).
+    blank lines). Known non-English fetch languages have conservative article,
+    recital, signature and annex markers.
     """
     units: list[dict] = []
+    native = LEGISLATIVE_MARKERS.get(language)
     signature_re = re.compile(r"^Done at \w+[,\s]+\d", re.IGNORECASE)
     # Pre-process: join lines where OCR splits "Article\n1" or "ANNEX\nI" across lines.
     text = re.sub(r"\b(Article)\s*\n\s*(\d+)\b", r"\1 \2", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(ANNEX)\s*\n\s*([IVXLCDMivxlcdm0-9]+)\b", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?m)^([ \t]*(?:Whereas|Considering))[ \t]*\n[ \t]*(?=[a-z])",
+        r"\1 ", text,
+    )
+    text = re.sub(
+        r"(?m)^[ \t]*\([ \t]*(\d+)[ \t]*\)[ \t]*\n[ \t]*(?=Whereas\b)",
+        r"(\1) ", text,
+    )
+    if native:
+        # Join only complete marker lines, never article references in prose.
+        for word, identifier in (
+            (native.article_word, r"\d+[a-z]*|premier|unique|único|unico"),
+            (native.annex_word, r"[IVXLCDM0-9]+"),
+        ):
+            text = re.sub(
+                rf"(?im)^(\s*(?:#{{1,3}}\s+)?{word})[ \t]*\n[ \t]*"
+                rf"({identifier})[ \t]*(?=\n|$)",
+                r"\1 \2", text,
+            )
     lines = text.split("\n")
     lines = _repair_interleaved_article_markers(lines)
     lines = _repair_embedded_operative_markers(lines)
@@ -1436,9 +1499,25 @@ def _parse_legislative_markdown(
     # "HAS DECIDED AS FOLLOWS:". Without this marker, the line falls through to
     # the recital handler and gets glued onto the last recital's text.
     enacting_formula_re = re.compile(
-        r"^(?:#{1,3}\s+)?(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b",
+        r"^(?:#{1,3}\s+)?(?:HAS|HAVE)\s+(?:ADOPTED|DECIDED|AGREED)\b"
+        r"(?=\s+(?:THIS|THE\s+FOLLOWING|AS\s+FOLLOWS)\b|\s*:?\s*$)",
         re.IGNORECASE,
     )
+    if native:
+        # French shares "Article" with the existing English parser, which also
+        # accepts same-line body text. Preserve that supported layout.
+        article_end = r"(?=\s|$)" if language == "fra" else r"\s*$"
+        art_heading_re = art_bare_re = native.compile(native.article + article_end)
+        annex_heading_re = annex_bare_re = native.compile(
+            native.annex_word + r"(?:\s+(?P<number>[IVXLCDM0-9]+))?\s*$",
+        )
+        annex_titled_re = native.compile(
+            native.annex_word + r"\s+(?P<number>[IVXLCDM0-9]+)\s*[:–—-]\s*(?P<title>.+)$",
+        )
+        signature_re = native.compile(native.signature)
+        enacting_formula_re = native.compile(native.enacting)
+        whereas_marker_re = native.compile(native.recital_marker + r"\s*:?\s*$")
+        whereas_line_re = native.compile(native.recital_start)
 
     def _flush_recital():
         nonlocal current_recital
@@ -1469,7 +1548,28 @@ def _parse_legislative_markdown(
             "_body": [],
         }
 
-    def _match_annex(stripped: str) -> re.Match | None:
+    def _match_annex(stripped: str, index: int | None = None) -> re.Match | None:
+        if native:
+            return annex_heading_re.match(stripped) or annex_titled_re.match(stripped)
+        if (
+            current_annex is not None and index is not None
+            and re.fullmatch(r"Annex\s+[IVXLCDM0-9]+", stripped)
+            and re.search(
+                r"\bcorrelation\s+table\b",
+                " ".join([current_annex.get("title") or "", *current_annex["_body"][:10]]),
+                re.IGNORECASE,
+            )
+        ):
+            following = [
+                s.strip() for s in lines[index + 1:]
+                if s.strip() and not _PDF_PAGE_HEADER_LINE_RE.fullmatch(s.strip())
+            ][:2]
+            next_annex = is_next_annex(current_annex.get("number"), stripped.split()[-1])
+            if (len(following) == 2 or not next_annex) and all(
+                re.match(r"^(?:Article\s+\d|Annex\s+[IVXLCDM0-9]|[—–-]$)", s)
+                for s in following
+            ):
+                return None
         multilingual = multilingual_annex_re.match(stripped)
         if multilingual:
             return multilingual
@@ -1483,6 +1583,16 @@ def _parse_legislative_markdown(
             or annex_titled_re.match(stripped)
         )
 
+    has_enacting_formula = False
+    for index, line in enumerate(lines):
+        if _is_in_quoted_region(line_offsets[index], quoted_regions):
+            continue
+        if _match_annex(line.strip()) or signature_re.match(line.strip()):
+            break
+        if enacting_formula_re.match(line.strip()):
+            has_enacting_formula = True
+            break
+
     for line_index, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
@@ -1491,12 +1601,34 @@ def _parse_legislative_markdown(
         if forced_outer_article:
             stripped = stripped.removeprefix(_FORCED_OUTER_ARTICLE)
 
+        in_quote = native is not None and _is_in_quoted_region(
+            line_offsets[line_index], quoted_regions,
+        )
+        # A convention attached as an annex has its own articles, formulae and
+        # signatures. They belong to that annex, not the enclosing decision.
+        if native and current_annex is not None:
+            annex_match = None if in_quote else _match_annex(stripped, line_index)
+            if annex_match and is_next_annex(
+                current_annex.get("number"), annex_match.groupdict().get("number"),
+            ):
+                _flush(current_annex, units, include_annexes)
+                current_annex = _start_annex(annex_match)
+            else:
+                current_annex["_body"].append(stripped)
+            continue
+        if native and in_quote:
+            if current_article is not None:
+                current_article["_body"].append(stripped)
+            elif current_recital is not None:
+                current_recital["_body"].append(stripped)
+            continue
+
         # "Done at <city>, <date>" signals the end of the enacting terms.
         # Annexes follow the signature in the OJ layout, so keep collecting
         # them; everything else after it (signatory names, footnote lists,
         # archival references) is noise and gets discarded.
         if past_signature:
-            annex_match = _match_annex(stripped)
+            annex_match = _match_annex(stripped, line_index)
             if annex_match:
                 _flush_recital()
                 _flush_article(current_article)
@@ -1508,6 +1640,8 @@ def _parse_legislative_markdown(
             continue
         if signature_re.match(stripped):
             past_signature = True
+            if native:
+                continue
             if current_article is not None:
                 current_article["_body"].append(stripped)
             elif current_annex is not None:
@@ -1525,26 +1659,52 @@ def _parse_legislative_markdown(
             continue
 
         art_match = art_heading_re.match(stripped) or art_bare_re.match(stripped)
+        if art_match and not forced_outer_article and (
+            (has_enacting_formula and not seen_enacting_formula)
+            or (native and not stripped.lstrip("# ")[0].isupper())
+        ):
+            art_match = None
         if (
             art_match
             and not forced_outer_article
             and _is_in_quoted_region(line_offsets[line_index], quoted_regions)
         ):
             art_match = None
+        if art_match and not native and not forced_outer_article and not stripped.startswith("#"):
+            previous_text = next(
+                (candidate.strip() for candidate in reversed(lines[:line_index]) if candidate.strip()),
+                "",
+            )
+            article_number = str((current_article or {}).get("number") or "0")
+            base = re.match(r"\d+", article_number)
+            expected_next = str(int(base.group()) + 1) if base else None
+            if (
+                _PDF_ARTICLE_REFERENCE_PREFIX_RE.search(previous_text)
+                and (
+                    art_match.group(1) != expected_next
+                    or stripped[art_match.end():].strip()
+                )
+            ):
+                art_match = None
         if art_match:
             after = stripped[art_match.end():].strip()
+            if native and after and not after[0].isupper():
+                art_match = None
             if (
-                art_match.group(1) is None
+                art_match is not None
+                and art_match.group(1) is None
+                and not native
                 and not re.match(
                     r"^#{0,3}\s*Sole\s+Article", stripped, re.IGNORECASE,
                 )
             ):
                 art_match = None
-            elif after and re.match(r"^[.,;:\-–—\|]+$", after):
+            elif art_match and after and re.match(r"^[.,;:\-–—\|]+$", after):
                 after = ""
             if art_match and after and re.match(
                 r"(?:\([a-z0-9]+\)|of |to |the |is |shall |and |in |for |or |"
-                r"which |has |was |provides |referred |,)",
+                r"which |has |was |provides |referred |by |from |with |under |"
+                r"concerning |thereof\b|,)",
                 after,
                 re.IGNORECASE,
             ):
@@ -1562,13 +1722,21 @@ def _parse_legislative_markdown(
                     ),
                     "",
                 )
+                # An isolated OCR "l" before the final article's opening
+                # sentence is not a lowercase continuation of a reference.
+                if not native and next_text == "l":
+                    continuation = [s.strip() for s in lines[line_index + 1:] if s.strip()]
+                    if len(continuation) > 1 and re.match(
+                        r"^This (?:Regulation|Decision|Directive) shall\b", continuation[1],
+                    ):
+                        next_text = continuation[1]
                 if next_text and (
                     next_text[0].islower()
                     or re.match(r"^\(\d+\)\s*(?:of\b|thereof)", next_text)
                     or next_text.startswith("thereof")
                 ):
                     art_match = None
-        annex_match = _match_annex(stripped)
+        annex_match = _match_annex(stripped, line_index)
 
         if art_match:
             in_recital_zone = False
@@ -1579,7 +1747,10 @@ def _parse_legislative_markdown(
 
             current_article = {
                 "type": "article",
-                "number": art_match.group(1) or "sole",
+                "number": (
+                    art_match.groupdict().get("number")
+                    or ("1" if art_match.groupdict().get("first") else "sole")
+                ) if native else art_match.group(1) or "sole",
                 "title": None,
                 "text": "",
                 "_body": [],

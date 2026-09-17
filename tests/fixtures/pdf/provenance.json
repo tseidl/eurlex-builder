@@ -1,0 +1,130 @@
+{
+  "retrieved": "2026-09-16",
+  "text_extraction": "extract_pdf_full_text (PyMuPDF default reading order)",
+  "sources": [
+    {
+      "celex_id": "31982D0809",
+      "language": "spa",
+      "url": "https://eur-lex.europa.eu/legal-content/ES/TXT/PDF/?uri=CELEX:31982D0809",
+      "pdf_sha256": "01493b0721947b39cc4b71522c4c823b46c58d5a6352dd01863fc5b58db589bc",
+      "text_sha256": "9a39892f47dc9aef1e86b9bb02d2901f94f01ff4636bb55fc85f2fdd361f9149",
+      "fixture": "31982D0809-spa.md",
+      "scope": "Full extracted text; byte-identical to the independently saved failure case."
+    },
+    {
+      "celex_id": "32016R0679",
+      "language": "fra",
+      "url": "https://eur-lex.europa.eu/legal-content/FR/TXT/PDF/?uri=CELEX:32016R0679",
+      "pdf_sha256": "5b67a45c2529b7bc127645a8db21cb383a414a0ba5945e22f7a8b908d62c7d8f",
+      "text_sha256": "fc53737aa54cb14f642e7773a0db95c4e78ee48a0c93fb56b4de935cdee231fb",
+      "fixture": "gdpr-articles-1-2.json",
+      "line_spans_1_based_inclusive": [
+        [
+          2010,
+          2010
+        ],
+        [
+          2013,
+          2045
+        ],
+        [
+          5089,
+          5096
+        ]
+      ],
+      "scope": "Verbatim enacting formula, articles 1 and 2, signature and following lines; intervening text omitted."
+    },
+    {
+      "celex_id": "32016R0679",
+      "language": "deu",
+      "url": "https://eur-lex.europa.eu/legal-content/DE/TXT/PDF/?uri=CELEX:32016R0679",
+      "pdf_sha256": "27b720c812be1bdf1462ff468ad6410fe94da80b48f6d10fa7e2269b9e5a1597",
+      "text_sha256": "299824065bdd8afcae59fa087e2e8627777c9da28718a8bdedb8895f2a78ffd1",
+      "fixture": "gdpr-articles-1-2.json",
+      "line_spans_1_based_inclusive": [
+        [
+          2095,
+          2095
+        ],
+        [
+          2098,
+          2131
+        ],
+        [
+          5256,
+          5263
+        ]
+      ],
+      "scope": "Verbatim enacting formula, articles 1 and 2, signature and following lines; intervening text omitted."
+    },
+    {
+      "celex_id": "32016R0679",
+      "language": "ita",
+      "url": "https://eur-lex.europa.eu/legal-content/IT/TXT/PDF/?uri=CELEX:32016R0679",
+      "pdf_sha256": "8f7504d289853f57647bd94d8926f4661e7b41a1204f4d74eca9d8685069427b",
+      "text_sha256": "3b9202104009374f10f0d8d2c89cf92c1dfb140f418489438b6e1c8a2296d336",
+      "fixture": "gdpr-articles-1-2.json",
+      "line_spans_1_based_inclusive": [
+        [
+          1866,
+          1866
+        ],
+        [
+          1869,
+          1901
+        ],
+        [
+          4780,
+          4787
+        ]
+      ],
+      "scope": "Verbatim enacting formula, articles 1 and 2, signature and following lines; intervening text omitted."
+    },
+    {
+      "celex_id": "32016R0679",
+      "language": "nld",
+      "url": "https://eur-lex.europa.eu/legal-content/NL/TXT/PDF/?uri=CELEX:32016R0679",
+      "pdf_sha256": "7e7d37376612a2f097ae2861cb621eebe7f169ca5f6d93d94e294e74c09516cd",
+      "text_sha256": "006f09dc1a3195b332af5c39e70b3f7855a87ded3d723d35a929d5e66f8d8a90",
+      "fixture": "gdpr-articles-1-2.json",
+      "line_spans_1_based_inclusive": [
+        [
+          2016,
+          2016
+        ],
+        [
+          2019,
+          2051
+        ],
+        [
+          5119,
+          5126
+        ]
+      ],
+      "scope": "Verbatim enacting formula, articles 1 and 2, signature and following lines; intervening text omitted."
+    },
+    {
+      "celex_id": "32016R0679",
+      "language": "spa",
+      "url": "https://eur-lex.europa.eu/legal-content/ES/TXT/PDF/?uri=CELEX:32016R0679",
+      "pdf_sha256": "a2fa3289de2f124c92748a181ad1499411b24ee3d26c74bd12781afa43cfa481",
+      "text_sha256": "b52b7d6c06076c9a54c9571d660ca9974d622d7a9e5e07f49e45ef894b1dc419",
+      "fixture": "gdpr-articles-1-2.json",
+      "line_spans_1_based_inclusive": [
+        [
+          1891,
+          1891
+        ],
+        [
+          1894,
+          1926
+        ],
+        [
+          4897,
+          4904
+        ]
+      ],
+      "scope": "Verbatim enacting formula, articles 1 and 2, signature and following lines; intervening text omitted."
+    }
+  ]
+}

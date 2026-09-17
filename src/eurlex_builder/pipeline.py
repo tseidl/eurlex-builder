@@ -238,8 +238,8 @@ def _should_run_translate_fallback(
       - AND at least one requested structure is conspicuously absent.
 
     Three recitals is the design threshold. Missing requested articles also
-    triggers the fallback because the English marker does not match several
-    supported source languages. Annex-only extraction retries only when no
+    triggers the fallback when the source-language markers do not recover them.
+    Annex-only extraction retries only when no
     annex structure was recovered.
     """
     if language == "eng":
@@ -779,7 +779,7 @@ class Pipeline:
 
             # Translate-before-extract fallback for non-English legislative PDFs
             # where the source-language parser produced little or no structural
-            # content (English-only markers don't fire on French/German/Italian PDFs).
+            # content, including recitals without native marker support.
             if (
                 _should_run_translate_fallback(
                     units, doc_type, language,
@@ -960,6 +960,8 @@ class Pipeline:
         reason = extraction_metadata.get("pdf_fallback_reason") or "conversion"
         content_source = metadata.get("content_source") or "cellar_pdf_unknown"
         metadata["content_source"] = f"{content_source}__pymupdf_{reason}"
+        for change in sorted(extraction_metadata.get("pdf_layout_changes", {})):
+            metadata["content_source"] += f"__{change}"
 
     def _extract_com_units(
         self,
