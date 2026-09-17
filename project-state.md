@@ -4,11 +4,24 @@ Updated 17 September 2026. This is the canonical shared current-state file.
 
 The paper dataset and its version-specific Zenodo software archive remain
 frozen. Do not rebuild or repair those data as part of package maintenance.
-Both package version fields now declare **0.3.0**. On 17 September the user
-authorised committing, pushing and releasing the PDF fixes with clear release
-notes, following the existing output-affecting minor-version convention.
-The [0.3.0 release notes](docs/release-notes-0.3.0.md) are prepared; publication
-is being checked through the existing CI and Trusted Publishing workflow.
+Both package version fields declare **0.3.0**, published on 17 September 2026
+with the user's approval. Release commit/tag `v0.3.0` resolves to
+`9e5e6f79cd0beb9235529f300692dd3cc0584364`.
+The [GitHub release](https://github.com/tseidl/eurlex-builder/releases/tag/v0.3.0)
+matches the concise [release notes](docs/release-notes-0.3.0.md).
+[PyPI 0.3.0](https://pypi.org/project/eurlex-builder/0.3.0/) is published through
+[Trusted Publishing](https://github.com/tseidl/eurlex-builder/actions/runs/35192893156).
+The downloaded published wheel matches all source modules at the release
+commit and excludes local instruction files/private inventories. Zenodo
+archived the release as version DOI
+[`10.5281/zenodo.22807281`](https://doi.org/10.5281/zenodo.22807281), under the
+unchanged concept DOI `10.5281/zenodo.21496963`.
+[Release-commit CI](https://github.com/tseidl/eurlex-builder/actions/runs/35192511874)
+and [tag CI](https://github.com/tseidl/eurlex-builder/actions/runs/35192893176)
+pass on Python 3.11 and 3.13, including all 555 tests, lint, configured type
+checking and builds. Publication and verification are complete; no release
+step remains pending. The subsequent state-note commit on `main` is docs only
+and does not move the release tag or require another version.
 
 The preceding release was **0.2.0**, published on 6 September 2026.
 Tag `v0.2.0` points to `a10b75e35be7a457b6e35e2708bcc42a889ba549`.
@@ -146,8 +159,8 @@ historical run's exact translation failure remains unverified.
 
 The user authorised package fixes for future runs, then extended the work to
 remaining PDF limitations and newly found issues, with conservative regression
-checks and optional Fable 5.1 consultations. The changes are implemented and
-the user subsequently authorised publication as **0.3.0**. The preceding
+checks and optional Fable 5.1 consultations. The changes were published as
+**0.3.0** with the user's subsequent approval. The preceding
 published tags, packages, DOIs and frozen paper data remain untouched.
 
 The known fetch language now reaches the PDF parser on Docling and text-layer
