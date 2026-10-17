@@ -9,7 +9,7 @@
 
 It is, to our knowledge, the first open-source tool to extract EU legislative text at **configurable sub-article granularity** across EUR-Lex's **heterogeneous document formats** — from modern HTML to 1970s text-only pages to scanned PDFs.
 
-The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis: A Granular History of EU Digital Policymaking" (preprint forthcoming on SocArXiv).
+The package accompanies Seidl and Kosti (2026), "Mapping Europe's Digital Acquis: A Granular History of EU Digital Policymaking", SocArXiv preprint, [doi:10.31235/osf.io/7hv94_v1](https://doi.org/10.31235/osf.io/7hv94_v1). Replication package: [osf.io/suf9m](https://osf.io/suf9m/).
 
 ![Landmark EU regulations decomposing into recitals and (sub-)articles](https://raw.githubusercontent.com/tseidl/eurlex-builder/main/figure-decomposition.png)
 
@@ -699,11 +699,12 @@ No scraping.
 If you use this package, please cite the accompanying paper and the software:
 
 ```bibtex
-@article{seidl_kosti_2026,
+@misc{seidl_kosti_2026,
   author  = {Seidl, Timo and Kosti, Nir},
   title   = {Mapping Europe's Digital Acquis: A Granular History of EU Digital Policymaking},
   year    = {2026},
-  note    = {Working paper, preprint forthcoming on SocArXiv}
+  howpublished = {SocArXiv preprint},
+  doi     = {10.31235/osf.io/7hv94_v1}
 }
 
 @software{eurlex_builder,

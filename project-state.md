@@ -1,6 +1,6 @@
 # Current project state
 
-Updated 17 September 2026. This is the canonical shared current-state file.
+Updated 17 October 2026. This is the canonical shared current-state file.
 
 The paper dataset and its version-specific Zenodo software archive remain
 frozen. Do not rebuild or repair those data as part of package maintenance.
@@ -51,6 +51,13 @@ also points here; historical memory entries are supporting context, not the
 current-state authority. The README's general software citation keeps
 the concept DOI without hard-coding a version; replication citations remain
 tied to the version actually used.
+
+Since 17 October 2026 the README cites the accompanying paper as published:
+Seidl and Kosti (2026), SocArXiv preprint
+[`10.31235/osf.io/7hv94_v1`](https://doi.org/10.31235/osf.io/7hv94_v1), with
+the replication package at [osf.io/suf9m](https://osf.io/suf9m/). This is a
+README-only change on `main` and needs no release; PyPI keeps showing the 0.3.0
+README until the next release.
 
 The authorized September maintenance fixes are implemented: shared XML-first
 HTML parsing without fetch-side DOM rewriting, mixed-text and full-text
